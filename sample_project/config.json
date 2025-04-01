@@ -1,0 +1,17 @@
+{
+  "app_name": "Sample Application",
+  "version": "1.0.0",
+  "debug": true,
+  "data_directory": "data",
+  "settings": {
+    "max_items": 100,
+    "page_size": 10,
+    "enable_cache": true,
+    "cache_timeout": 300
+  },
+  "api": {
+    "base_url": "https://api.example.com",
+    "timeout": 30,
+    "retry_count": 3
+  }
+} 
