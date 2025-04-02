@@ -7,6 +7,7 @@ import os
 import networkx as nx
 from typing import Dict, List, Any, Optional, Tuple, Set, Union
 import json
+import hashlib
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 # Import OpenAI client
@@ -36,60 +37,49 @@ class GraphRAGEngine:
         self.graph = graph
         self.search_engine = search_engine
         self.client = OpenAI()
-        self.chat_model = MODEL_CONFIG["models"].get("chat", "gpt-3.5-turbo")
-        
-    def query(self, query_text: str, 
-              max_results: int = 5,
-              search_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # Use a faster model for chat completions
+        self.chat_model = MODEL_CONFIG["models"].get("chat", "gpt-3.5-turbo-1106")
+        # Add response cache to avoid redundant API calls
+        self.response_cache = {}
+    
+    def query(self, query_text: str, search_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Perform a query using the Graph RAG approach.
+        Execute a search query using the graph search engine.
         
         Args:
             query_text: The query text
-            max_results: Maximum number of results to return
             search_params: Additional search parameters
             
         Returns:
-            Dictionary containing search results and context
+            Dictionary containing search results and metadata
         """
-        if not self.search_engine:
-            return {"error": "Search engine not initialized", "results": []}
-            
-        if not search_params:
-            search_params = {}
-            
-        # Set default parameters
-        params = {
-            "max_results": max_results,
-            "traverse_graph": True,
-            "use_embeddings": True,
-            "include_code_context": True
-        }
-        params.update(search_params)
+        if self.search_engine is None:
+            if self.graph is None:
+                return {"error": "No graph available for search."}
+                
+            # Create a search engine using the graph
+            from talktocode.retrieval.search import GraphSearchEngine
+            self.search_engine = GraphSearchEngine(self.graph)
         
-        # Use the search engine to find relevant entities
+        # Execute search
         try:
-            results = self.search_engine.search(
-                query=query_text,
-                **params
-            )
-            
+            results = self.search_engine.search(query_text, params=search_params)
             return {
                 "query": query_text,
                 "results": results,
-                "count": len(results) if results else 0,
-                "search_params": params
+                "metadata": {
+                    "strategy": search_params.get("strategy", "local") if search_params else "local",
+                    "num_results": len(results)
+                }
             }
-            
         except Exception as e:
             return {
-                "error": str(e),
+                "error": f"Error executing search: {str(e)}",
                 "query": query_text,
-                "results": [],
-                "count": 0
+                "results": []
             }
     
-    @retry(wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(3))
+    @retry(wait=wait_random_exponential(min=1, max=5), stop=stop_after_attempt(2))
     def _generate_chat_completion(
         self, 
         messages: List[Dict[str, str]]
@@ -106,7 +96,9 @@ class GraphRAGEngine:
         try:
             response = self.client.chat.completions.create(
                 model=self.chat_model,
-                messages=messages
+                messages=messages,
+                temperature=0.2,  # Lower temperature for more deterministic responses
+                max_tokens=800    # Limit tokens for faster responses
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -127,6 +119,11 @@ class GraphRAGEngine:
         Returns:
             Dictionary containing the generated response and metadata
         """
+        # Check cache first to avoid redundant API calls
+        cache_key = self._generate_cache_key(query_text, context)
+        if cache_key in self.response_cache:
+            return self.response_cache[cache_key]
+            
         # If no context is provided, retrieve it
         if context is None:
             search_results = self.query(query_text, search_params=search_params)
@@ -145,11 +142,11 @@ class GraphRAGEngine:
             }
         
         try:
-            # Format context for the LLM
+            # Format context for the LLM, but limit size
             formatted_context = "Here is information from the codebase:\n\n"
             
-            # Extract information from the context
-            for i, item in enumerate(context[:10]):  # Limit to first 10 items to avoid token limits
+            # Extract information from the context, limiting to 5 items to reduce tokens
+            for i, item in enumerate(context[:5]):  # Limit to first 5 items for faster processing
                 if isinstance(item, dict):
                     # Get entity information
                     entity_type = item.get("type", "Unknown")
@@ -163,8 +160,8 @@ class GraphRAGEngine:
                     formatted_context += f"File: {source_file}\n"
                     formatted_context += f"Description: {description}\n"
                     
-                    # Include code snippet if available and not too long
-                    if code_snippet and len(code_snippet) < 1000:
+                    # Include code snippet if available, but limit size
+                    if code_snippet and len(code_snippet) < 500:  # Further reduce snippet size
                         formatted_context += f"Code:\n{code_snippet}\n\n"
                     else:
                         formatted_context += "\n"
@@ -174,7 +171,8 @@ class GraphRAGEngine:
                 {"role": "system", "content": 
                  "You are an AI assistant specialized in explaining code. Analyze the provided code entities and answer questions about them. "
                  "Be precise and technical, but explain concepts clearly. If you're not sure about something, say so instead of guessing. "
-                 "When referring to code entities, include their type and file location to help the user locate them."
+                 "When referring to code entities, include their type and file location to help the user locate them. "
+                 "Keep your responses concise and focused on answering the user's question directly."
                 },
                 {"role": "user", "content": f"Here is information about code from a codebase:\n\n{formatted_context}\n\nMy question is: {query_text}"}
             ]
@@ -189,17 +187,22 @@ class GraphRAGEngine:
                     references.append({
                         "file": item.get("source_file", ""),
                         "line": item.get("lineno", 0),
+                        "end_line": item.get("end_lineno", item.get("lineno", 0) + 5),  # Ensure end_line is provided
                         "name": item.get("name", ""),
                         "type": item.get("type", ""),
                         "code": item.get("code_snippet", "")
                     })
             
-            return {
+            result = {
                 "query": query_text,
                 "response": response_text,
                 "context": context,
                 "references": references
             }
+            
+            # Cache the result
+            self.response_cache[cache_key] = result
+            return result
             
         except Exception as e:
             # Return error message if something went wrong
@@ -208,4 +211,17 @@ class GraphRAGEngine:
                 "response": f"I encountered an error while processing your query: {str(e)}. Please try again with a different question.",
                 "context": context,
                 "references": []
-            } 
+            }
+    
+    def _generate_cache_key(self, query_text: str, context: Optional[List[Dict[str, Any]]]) -> str:
+        """Generate a cache key for the query and context."""
+        if context is None:
+            context_str = "none"
+        else:
+            # Use a stable representation of the context
+            context_ids = sorted([item.get("id", str(i)) for i, item in enumerate(context)])
+            context_str = ",".join(context_ids)
+        
+        # Create a hash of the query and context
+        key_str = f"{query_text}:{context_str}"
+        return hashlib.md5(key_str.encode()).hexdigest() 

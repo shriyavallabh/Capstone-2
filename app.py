@@ -23,6 +23,8 @@ from typing import Dict, Any, List, Optional, Union
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import queue
+import threading
 
 # Monkey patch for OpenAI client to handle proxies compatibility issue
 # This is needed because the newer OpenAI Python library handles proxies differently
@@ -777,6 +779,12 @@ def initialize_app_state():
         }
     if "uploading_file" not in st.session_state:
         st.session_state.uploading_file = False
+    # Set default visualization mode to Artistic
+    if "visualization_mode" not in st.session_state:
+        st.session_state.visualization_mode = "Artistic"
+    # Set default max nodes for display
+    if "max_display_nodes" not in st.session_state:
+        st.session_state.max_display_nodes = 200
 
 # Initialize session state
 initialize_app_state()
@@ -1086,8 +1094,8 @@ def format_response_with_references(response_text: str, code_references: List[Co
             # Determine language from file name for syntax highlighting
             language = get_language_from_file(file_name)
             
-            # Add code block with syntax highlighting
-            formatted_text += f"```{language}\n{ref.code}\n```\n"
+            # Add code block with syntax highlighting - using snippet instead of code
+            formatted_text += f"```{language}\n{ref.snippet}\n```\n"
     
     return formatted_text
 
@@ -1136,54 +1144,30 @@ def process_query(
     community_detector: Optional[Any] = None,
     community_reports: Optional[Dict[str, Any]] = None,
     search_settings: Optional[Dict[str, Any]] = None,
-    timeout: int = 60
+    timeout: int = 30  # Reduced from 60 to 30 seconds
 ) -> Dict[str, Any]:
     """
-    Process a user query using the GraphRAGEngine.
+    Process a natural language query about the code.
     
     Args:
-        query: The user's query text
-        graph: CodeKnowledgeGraph instance
-        community_detector: HierarchicalCommunityDetector instance
-        community_reports: Dictionary of community reports
-        search_settings: Search strategy and parameters
-        timeout: Maximum time in seconds to wait for a response
+        query: The natural language query
+        graph: The code knowledge graph
+        community_detector: The community detector
+        community_reports: The community reports
+        search_settings: Search settings
+        timeout: Timeout in seconds (default: 30)
         
     Returns:
-        Dictionary containing response information, including:
-        - response_text: The text response to show the user
-        - code_references: List of CodeReference objects
-        - status: 'success', 'error', or 'timeout'
-        - error_message: Error message if status is 'error'
-        - metadata: Additional information about the response
+        Dictionary containing the response, code references, and other metadata
     """
-    if not query.strip():
-        return {
-            "response_text": "I didn't receive a question. Please ask something about the code.",
-            "code_references": [],
-            "status": "error",
-            "error_message": "Empty query",
-            "metadata": {}
-        }
-    
-    if not graph or not community_detector:
-        return {
-            "response_text": "Please upload and process a codebase first.",
-            "code_references": [],
-            "status": "error", 
-            "error_message": "No codebase processed",
-            "metadata": {}
-        }
-    
-    # Set default search settings if not provided
+    # Default search settings if not provided
     if not search_settings:
         search_settings = {
             "strategy": "local",
             "params": {
-                "max_hops": 2,
-                "top_k_entities": 15,
-                "min_similarity": 0.6,
-                "include_code": True
+                "max_results": 10,
+                "include_code": True,
+                "max_hops": 2
             }
         }
     
@@ -1209,8 +1193,17 @@ def process_query(
             graph=graph
         )
         
-        # Process the query using the engine with timeout
-        # We'll use a basic search first and then process with RAG
+        # Optimize search parameters for faster response
+        if "params" in search_settings:
+            # Reduce max_results for faster search
+            if "max_results" in search_settings["params"] and search_settings["params"]["max_results"] > 10:
+                search_settings["params"]["max_results"] = 10
+                
+            # Limit max_hops to reduce graph traversal time
+            if "max_hops" in search_settings["params"] and search_settings["params"]["max_hops"] > 2:
+                search_settings["params"]["max_hops"] = 2
+        
+        # Process the query using the engine with optimized settings
         search_results = search_codebase(
             query=query,
             graph=graph,
@@ -1240,20 +1233,14 @@ def process_query(
         results["metadata"]["entities"] = len(search_results.get("entities", []))
         results["metadata"]["communities"] = len(search_results.get("communities", []))
         
-    except TimeoutError:
-        results["status"] = "timeout"
-        results["error_message"] = "Query processing timed out. Please try a more specific question."
-        results["response_text"] = "I'm sorry, but your query took too long to process. Please try asking a more specific question about the codebase."
-    
     except Exception as e:
         results["status"] = "error"
         results["error_message"] = str(e)
-        results["response_text"] = f"I encountered an error while processing your query: {str(e)}. Please try again with a different question."
         traceback.print_exc()
     
-    finally:
-        # Calculate and record query time
-        results["metadata"]["query_time"] = time.time() - start_time
+    # Calculate query time
+    end_time = time.time()
+    results["metadata"]["query_time"] = end_time - start_time
     
     return results
 
@@ -1272,130 +1259,190 @@ def extract_code_references_from_response(response):
     references = response.get("references", [])
     
     for ref in references:
-        if "file" in ref and "line" in ref:
-            # Try to create a CodeReference object
-            try:
-                code_ref = CodeReference(
-                    file_path=ref["file"],
-                    start_line=ref["line"],
-                    end_line=ref.get("end_line", ref["line"] + 10),  # Default to 10 lines if end_line not provided
-                    code=ref.get("code", "")
-                )
-                code_references.append(code_ref)
-            except Exception as e:
-                print(f"Error creating code reference: {str(e)}")
+        # Skip invalid references
+        if not ref or not isinstance(ref, dict):
+            continue
+            
+        # Only process references with required fields
+        if "file" not in ref or not ref["file"]:
+            continue
+            
+        # Try to create a CodeReference object
+        try:
+            # Get line numbers with appropriate defaults
+            start_line = int(ref.get("line", 1))
+            # Use end_line if provided, otherwise default to start_line + a small number
+            end_line = int(ref.get("end_line", start_line + 10))
+            
+            # Ensure we have a valid file path
+            file_path = ref["file"]
+            if not file_path or not isinstance(file_path, str):
+                continue
+                
+            # Extract code snippet, with fallback
+            code_snippet = ref.get("code", "")
+            if not code_snippet and "code_snippet" in ref:
+                code_snippet = ref["code_snippet"]
+                
+            # Create the reference object
+            code_ref = CodeReference(
+                file_path=file_path,
+                start_line=start_line,
+                end_line=end_line,
+                entity_name=ref.get("name", ""),
+                entity_type=ref.get("type", ""),
+                snippet=code_snippet
+            )
+            code_references.append(code_ref)
+        except Exception as e:
+            # Log error details but continue processing other references
+            print(f"Error creating code reference: {str(e)}")
+            print(f"Reference data: {ref}")
     
     return code_references
 
 def process_query_with_timeout(
-    query: str, 
+    query: str,
     graph: Optional[CodeKnowledgeGraph] = None,
     community_detector: Optional[Any] = None,
     community_reports: Optional[Dict[str, Any]] = None,
     search_settings: Optional[Dict[str, Any]] = None,
-    timeout: int = 60
+    timeout: int = 30
 ) -> Dict[str, Any]:
     """
-    Process a query with a timeout to prevent hanging on complex queries.
+    Process a query with a timeout to prevent hanging.
     
     Args:
-        query: The user's query text
-        graph: CodeKnowledgeGraph instance
-        community_detector: HierarchicalCommunityDetector instance
-        community_reports: Dictionary of community reports
-        search_settings: Search strategy and parameters
-        timeout: Maximum time in seconds to wait for a response
+        query: The query string
+        graph: Code knowledge graph
+        community_detector: Community detector
+        community_reports: Community reports
+        search_settings: Search settings
+        timeout: Timeout in seconds (default: 30)
         
     Returns:
-        Dictionary with response data or error information
+        Dictionary with the response data
     """
-    import concurrent.futures
-    import threading
+    # Queue for the result
+    result_queue = queue.Queue()
     
-    # Create a ThreadPoolExecutor to run the query
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        # Submit the query to the executor
-        future = executor.submit(
-            process_query, 
-            query, 
-            graph, 
-            community_detector, 
-            community_reports, 
-            search_settings
-        )
-        
+    # Function to process the query and put the result in the queue
+    def process_and_queue():
         try:
-            # Wait for the result with a timeout
-            result = future.result(timeout=timeout)
-            return result
-        
-        except concurrent.futures.TimeoutError:
-            # If the query times out, return a timeout response
-            return {
-                "response_text": "Your query took too long to process. Please try a more specific question or adjust your search parameters.",
+            result = process_query(
+                query=query,
+                graph=graph,
+                community_detector=community_detector,
+                community_reports=community_reports,
+                search_settings=search_settings
+            )
+            result_queue.put(result)
+        except Exception as e:
+            result_queue.put({
+                "response_text": f"Error processing query: {str(e)}",
                 "code_references": [],
-                "status": "timeout",
-                "error_message": f"Query processing timed out after {timeout} seconds",
-                "metadata": {
-                    "query_time": timeout,
-                    "strategy": search_settings.get("strategy") if search_settings else "unknown",
-                    "timeout": timeout
-                }
-            }
+                "status": "error",
+                "error_message": str(e),
+                "metadata": {}
+            })
+    
+    # Start the processing thread
+    thread = threading.Thread(target=process_and_queue)
+    thread.daemon = True  # Allow the thread to be terminated when the main thread exits
+    thread.start()
+    
+    try:
+        # Wait for the result with timeout
+        result = result_queue.get(timeout=timeout)
+        return result
+    except queue.Empty:
+        # Timeout occurred
+        return {
+            "response_text": "I'm sorry, but your query took too long to process. Please try asking a more specific question about the codebase.",
+            "code_references": [],
+            "status": "timeout",
+            "error_message": "Query processing timed out",
+            "metadata": {"query_time": timeout}
+        }
 
 def handle_message(prompt):
     """
-    Handle user message and process the query to generate a response.
+    Handle incoming chat messages and generate responses.
     
     Args:
-        prompt: User message/query
+        prompt: User's message text
     """
-    if not st.session_state.processing_complete:
-        show_warning("Please upload and process your code before asking questions.")
+    # Check if we have a processed codebase
+    if not st.session_state.get("processing_complete", False):
+        response_text = "Please upload and process a codebase first before asking questions."
+        
+        # Add assistant message to chat history
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        st.session_state.chat_messages.append({
+            "role": "assistant", 
+            "content": response_text,
+            "timestamp": timestamp
+        })
         return
     
-    # Check for empty or very short queries
-    if not prompt or len(prompt.strip()) < 3:
-        show_warning("Please enter a valid question with at least 3 characters.")
-        return
+    # Get current search settings
+    search_settings = {
+        "strategy": st.session_state.get("search_strategy", "local"),
+        "params": st.session_state.get("search_params", {
+            "max_results": 10,
+            "include_code": True,
+            "max_hops": 2
+        })
+    }
     
-    # Record the time the message was sent
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    
-    # Add user message to chat history
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = []
-    
-    # Add user message to chat history
-    st.session_state.chat_messages.append({
-        "role": "user", 
-        "content": prompt,
-        "timestamp": timestamp
-    })
-    
-    # Get search settings from session state
-    search_settings = st.session_state.current_search_settings
-    
-    # Show processing status
-    with st.status("Processing your question...", expanded=True) as status:
-        st.write("Searching codebase and generating response...")
+    # Show processing status with a more detailed, dynamically updating indicator
+    with st.status("Analyzing your question...", expanded=True) as status:
+        # Create progress updates using milestones
+        milestones = [
+            ("Searching codebase...", 0),
+            ("Analyzing code entities...", 0.3),
+            ("Retrieving relevant context...", 0.6),
+            ("Generating response...", 0.8)
+        ]
         
-        # Add a progress indicator
-        progress_placeholder = st.empty()
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
         
-        # Process the query with timeout
+        # Display initial milestone
+        progress_text.write(milestones[0][0])
+        
+        # Function to update progress in a separate thread
+        def update_progress():
+            for i, (message, progress_value) in enumerate(milestones):
+                time.sleep(0.5)  # Small delay between updates
+                progress_bar.progress(progress_value)
+                progress_text.write(message)
+                
+                # Don't sleep after the last milestone
+                if i < len(milestones) - 1:
+                    time.sleep(0.8)
+        
+        # Start progress updates in a separate thread
+        progress_thread = threading.Thread(target=update_progress)
+        progress_thread.start()
+        
+        # Process the query with reduced timeout (30 seconds)
         response_data = process_query_with_timeout(
             query=prompt,
             graph=st.session_state.graph,
             community_detector=st.session_state.community_detector,
             community_reports=st.session_state.community_reports,
             search_settings=search_settings,
-            timeout=60  # 60 second timeout
+            timeout=30  # Reduced timeout for faster response
         )
+        
+        # Update final progress
+        progress_bar.progress(1.0)
+        progress_text.write("Response complete!")
         
         # Update status based on response
         if response_data["status"] == "success":
-            status.update(label="Response generated successfully!", state="complete", expanded=False)
+            status.update(label="Response ready!", state="complete", expanded=False)
         elif response_data["status"] == "timeout":
             status.update(label="Query timed out", state="error", expanded=True)
             st.warning("The query took too long to process. Please try a more specific question.")
@@ -1420,15 +1467,6 @@ def handle_message(prompt):
         "timestamp": response_timestamp,
         "metadata": response_data.get("metadata", {})
     })
-    
-    # Store search results in session state
-    st.session_state.search_results = response_data.get("search_results", {})
-    
-    # Set the current tab to results to show search results
-    st.session_state.current_tab = "results"
-    
-    # Force a rerun to update the UI
-    st.rerun()
 
 # Handle tab change
 def handle_tab_change(tab_name):
@@ -1644,6 +1682,18 @@ def main():
             # Check current tab
             if "current_tab" in st.session_state:
                 st.info(f"Current tab: {st.session_state.current_tab}")
+        
+        # Add visualization mode selector
+        if "graph" in st.session_state and st.session_state.graph is not None:
+            st.write("### Visualization Settings")
+            viz_mode = st.selectbox(
+                "Visualization Mode",
+                options=["Standard", "Artistic"],
+                index=0,
+                help="Choose the graph visualization style"
+            )
+            if "visualization_mode" not in st.session_state or st.session_state.visualization_mode != viz_mode:
+                st.session_state.visualization_mode = viz_mode
     
     # Store the current settings
     if "search_settings" not in st.session_state:
@@ -1738,13 +1788,67 @@ def main():
         # Get search results if available
         search_results = st.session_state.get("search_results", None)
         
-        # Create graph container
-        create_graph_container(
-            is_processed=is_processed,
-            graph=graph_data,
-            communities=communities,
-            search_results=search_results
-        )
+        # Add prominent visualization mode selector directly in the graph tab
+        if is_processed and graph_data is not None:
+            st.markdown("### Visualization Style")
+            cols = st.columns([3, 3, 2])
+            
+            with cols[0]:
+                viz_mode = st.radio(
+                    "Select Visualization Style",
+                    options=["Standard", "Artistic"],
+                    index=1 if st.session_state.get("visualization_mode") == "Artistic" else 0,
+                    horizontal=True
+                )
+                if viz_mode != st.session_state.get("visualization_mode"):
+                    st.session_state.visualization_mode = viz_mode
+                    st.rerun()
+            
+            with cols[1]:
+                max_nodes = st.slider(
+                    "Max Nodes to Display",
+                    min_value=50,
+                    max_value=500,
+                    value=200,
+                    step=50,
+                    help="Higher values show more nodes but may slow down visualization"
+                )
+                if "max_display_nodes" not in st.session_state or st.session_state.max_display_nodes != max_nodes:
+                    st.session_state.max_display_nodes = max_nodes
+            
+            with cols[2]:
+                if st.button("🔄 Refresh Visualization", use_container_width=True):
+                    st.rerun()
+        
+        # Create graph container with visualization mode
+        if is_processed and graph_data is not None:
+            # Get visualization mode
+            viz_mode = st.session_state.get("visualization_mode", "Artistic")  # Default to Artistic now
+            max_nodes = st.session_state.get("max_display_nodes", 200)
+            
+            if viz_mode == "Artistic":
+                # Import the artistic visualization function
+                from ui.ui_components import create_artistic_graph_visualization
+                
+                # Create the artistic visualization
+                st.markdown("## Artistic Code Knowledge Graph")
+                st.markdown("This visualization shows your code as an interactive 3D network with flowing connections.")
+                st.markdown("**Instructions:** Drag to rotate, scroll to zoom, and hover over nodes to see details. Node names become visible when you zoom in.")
+                
+                create_artistic_graph_visualization(
+                    graph=graph_data,
+                    communities=communities,
+                    max_nodes=max_nodes,
+                    view_mode="artistic"
+                )
+            else:
+                # Create standard graph container
+                create_graph_container(
+                    is_processed=is_processed,
+                    graph=graph_data,
+                    communities=communities,
+                    search_results=search_results
+                )
     
     # Chat tab
     with tabs[1]:
