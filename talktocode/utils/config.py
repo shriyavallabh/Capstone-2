@@ -8,11 +8,21 @@ load_dotenv()
 # API Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# UBS Color Constants
-UBS_RED = "#FF0000"
-LIGHT_GREY = "#F5F5F5"
-DARK_GREY = "#333333"
-BORDER_GREY = "#CCCCCC"
+# COMPANY Color Constants (Renamed from UBS)
+# Moved from ui_components.py to break circular import
+COMPANY_COLORS = {
+    "red": "#EC0016", # Keeping original color value for now
+    "light_red": "#FF6D6A",
+    "dark_red": "#B30012",
+    "blue": "#0205A8",
+    "light_blue": "#9A9CFF",
+    "dark_blue": "#000066",
+    "black": "#000000",
+    "dark_gray": "#333333",
+    "medium_gray": "#666666",
+    "light_gray": "#CCCCCC",
+    "white": "#FFFFFF",
+}
 
 # Embedding Model Configuration
 EMBEDDING_MODELS = {
@@ -53,9 +63,9 @@ MODEL_CONFIG = {
     # Model names for different functions
     "models": {
         "embedding": DEFAULT_EMBEDDING_MODEL,  # Default embedding model
-        "chat": "gpt-3.5-turbo",
-        "code_analysis": "gpt-3.5-turbo-16k",
-        "entity_extraction": "gpt-3.5-turbo-16k",
+        "chat": "gpt-4o",
+        "code_analysis": "gpt-4o",
+        "entity_extraction": "gpt-4o",
     },
     
     # Embedding configuration
@@ -69,11 +79,24 @@ MODEL_CONFIG = {
             "expiration_days": 30,  # Cache entries expire after 30 days
             "max_size_mb": 500,  # Maximum cache size in MB
         },
+        "faiss": {
+            "enabled": True,
+            "index_directory": ".talktocode_cache/faiss_indices",
+            "index_factory_string": "Flat",
+            "normalize_vectors": True
+        },
         "batch": {
             "enabled": True,
             "size": min(50, EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]["max_batch_items"]),  # Default batch size
             "timeout_ms": 5000,  # Maximum time to wait for batch completion
         }
+    },
+    
+    # LLM parameters
+    "llm": {
+        "temperature": 0.5,
+        "max_tokens": 4096,
+        "request_timeout": 120
     },
     
     # Graph parameters

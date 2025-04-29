@@ -36,11 +36,23 @@ class GraphRAGEngine:
         """
         self.graph = graph
         self.search_engine = search_engine
-        self.client = OpenAI()
+        self._client = None
         # Use a faster model for chat completions
         self.chat_model = MODEL_CONFIG["models"].get("chat", "gpt-3.5-turbo-1106")
         # Add response cache to avoid redundant API calls
         self.response_cache = {}
+    
+    def get_client(self):
+        """Get or initialize the OpenAI client."""
+        if self._client is None:
+            try:
+                # Import the shared client function from the main app
+                from app import get_openai_client
+                self._client = get_openai_client()
+            except ImportError:
+                # Fallback if the import fails
+                self._client = OpenAI()
+        return self._client
     
     def query(self, query_text: str, search_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -94,7 +106,7 @@ class GraphRAGEngine:
             Generated response text
         """
         try:
-            response = self.client.chat.completions.create(
+            response = self.get_client().chat.completions.create(
                 model=self.chat_model,
                 messages=messages,
                 temperature=0.2,  # Lower temperature for more deterministic responses
@@ -142,30 +154,48 @@ class GraphRAGEngine:
             }
         
         try:
-            # Format context for the LLM, but limit size
+            # Format context for the LLM, allowing for a much larger context
             formatted_context = "Here is information from the codebase:\n\n"
-            
-            # Extract information from the context, limiting to 5 items to reduce tokens
-            for i, item in enumerate(context[:5]):  # Limit to first 5 items for faster processing
-                if isinstance(item, dict):
-                    # Get entity information
-                    entity_type = item.get("type", "Unknown")
-                    entity_name = item.get("name", "Unknown")
-                    source_file = item.get("source_file", "Unknown")
-                    description = item.get("description", "No description available")
-                    code_snippet = item.get("code_snippet", "")
-                    
-                    # Format the entity information
-                    formatted_context += f"--- Entity {i+1}: {entity_name} ({entity_type}) ---\n"
-                    formatted_context += f"File: {source_file}\n"
-                    formatted_context += f"Description: {description}\n"
-                    
-                    # Include code snippet if available, but limit size
-                    if code_snippet and len(code_snippet) < 500:  # Further reduce snippet size
-                        formatted_context += f"Code:\n{code_snippet}\n\n"
-                    else:
-                        formatted_context += "\n"
-            
+            current_char_count = len(formatted_context)
+            # Increased character limit significantly for gpt-4o
+            MAX_CONTEXT_CHARS = 100000 # Allow up to 100k characters (approx 25k tokens)
+
+            # Include more context items
+            # Limit based on character count instead of a fixed number of items
+            for i, item in enumerate(context):
+                if not isinstance(item, dict):
+                    continue
+
+                # Get entity information
+                entity_type = item.get("type", "Unknown")
+                entity_name = item.get("name", "Unknown")
+                source_file = item.get("source_file", "Unknown")
+                description = item.get("description", "No description available")
+                code_snippet = item.get("code_snippet", "")
+
+                # Format the entity information for the context string
+                entry_text = f"--- Entity {i+1}: {entity_name} ({entity_type}) ---\n"
+                entry_text += f"File: {source_file}\n"
+                entry_text += f"Description: {description}\n"
+
+                # Include code snippet if available
+                if code_snippet:
+                    # Limit snippet length individually if necessary, but prioritize overall context length
+                    # max_snippet_len = 2000
+                    # entry_text += f"Code:\n{code_snippet[:max_snippet_len]}{'...' if len(code_snippet) > max_snippet_len else ''}\n\n"
+                    entry_text += f"Code:\n{code_snippet}\n\n"
+                else:
+                    entry_text += "\n"
+
+                # Check if adding this entry exceeds the character limit
+                if current_char_count + len(entry_text) > MAX_CONTEXT_CHARS:
+                    print(f"Context limit ({MAX_CONTEXT_CHARS} chars) reached. Stopping context inclusion.")
+                    break # Stop adding more context
+
+                # Add the entry to the context and update the count
+                formatted_context += entry_text
+                current_char_count += len(entry_text)
+
             # Create messages for the chat completion
             messages = [
                 {"role": "system", "content": 
@@ -190,7 +220,7 @@ class GraphRAGEngine:
                         "end_line": item.get("end_lineno", item.get("lineno", 0) + 5),  # Ensure end_line is provided
                         "name": item.get("name", ""),
                         "type": item.get("type", ""),
-                        "code": item.get("code_snippet", "")
+                        "snippet": item.get("code_snippet", "")
                     })
             
             result = {

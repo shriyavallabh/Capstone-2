@@ -18,6 +18,12 @@ from talktocode.utils.config import (
 )
 from openai import OpenAI
 
+# Use lazy initialization to avoid recursion issues
+def get_client():
+    """Get or initialize the OpenAI client."""
+    client = OpenAI()
+    return client
+
 def get_current_embedding_config():
     """Get the current embedding configuration."""
     
@@ -74,7 +80,7 @@ def batch_embedding_example(texts: List[str]):
     Args:
         texts: List of texts to embed
     """
-    client = OpenAI()
+    client = get_client()
     
     # Get current configuration
     model_name = MODEL_CONFIG["models"]["embedding"]

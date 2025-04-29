@@ -191,6 +191,20 @@ class HierarchicalCommunityDetector:
         
         return community_members
     
+    def get_nodes_in_community(self, level_idx: int, community_id: int) -> List[Any]:
+        """
+        Get all nodes that belong to a specific community at a given level.
+        
+        Args:
+            level_idx: Index of the level (0 = coarsest, 2 = finest in default settings)
+            community_id: The ID of the community to get nodes for
+            
+        Returns:
+            List of node IDs that belong to the specified community
+        """
+        communities = self.get_communities_at_level(level_idx)
+        return communities.get(community_id, [])
+    
     def get_community_hierarchy_mapping(self) -> Dict[Tuple[int, int], Set[int]]:
         """
         Create a mapping between communities at different levels.

@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""
+UI Components for the Talk to Code application.
+
+This module contains pure Python Streamlit components for creating
+a consistent and user-friendly interface for the Talk to Code application.
+"""
+
+import os
+import streamlit as st
+from streamlit.runtime.uploaded_file_manager import UploadedFile
+from pathlib import Path
+import tempfile
+import zipfile
+import base64
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+import networkx as nx
+from plotly.subplots import make_subplots
+from typing import Dict, Any, Callable, List, Optional, Tuple, Union
+import matplotlib.pyplot as plt
+import random
+import time
+from datetime import datetime
+
+# UBS Brand Colors
+UBS_COLORS = {
+    "red": "#EC0016",
+    "light_red": "#FF6D6A",
+    "dark_red": "#B30012",
+    "blue": "#0205A8",
+    "light_blue": "#9A9CFF",
+    "dark_blue": "#000066",
+    "black": "#000000",
+    "dark_gray": "#333333",
+    "medium_gray": "#666666",
+    "light_gray": "#CCCCCC",
+    "white": "#FFFFFF",
+}
+
+# Initialize session state variables
+def initialize_ui_state():
+    """Initialize session state variables for UI components."""
+    if "sidebar_collapsed" not in st.session_state:
+        st.session_state.sidebar_collapsed = False
+    if "current_tab" not in st.session_state:
+        st.session_state.current_tab = "graph"
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
+
+# Status message functions
+def show_info(message: str):
+    """Display an information message."""
+    st.markdown(f'<div class="status-box info-box">{message}</div>', unsafe_allow_html=True)
+
+def show_success(message: str):
+    """Display a success message."""
+    st.markdown(f'<div class="status-box success-box">{message}</div>', unsafe_allow_html=True)
+
+def show_warning(message: str):
+    """Display a warning message."""
+    st.markdown(f'<div class="status-box warning-box">{message}</div>', unsafe_allow_html=True)
+
+def show_error(message: str):
+    """Display an error message."""
+    st.markdown(f'<div class="status-box error-box">{message}</div>', unsafe_allow_html=True)
+
+# 1. Header Component
+def create_header(title: str = "Talk to Code", subtitle: str = "Explore and understand code repositories"):
+    """
+    Create a custom header with UBS styling.
+    
+    Args:
+        title: The main title text
+        subtitle: The subtitle text
+    """
+    header_container = st.container()
+    with header_container:
+        st.markdown(f'<h1 class="ubs-header" style="font-size: 2.5rem;">{title}</h1>', unsafe_allow_html=True)
+        st.markdown(f'<h3 class="ubs-subheader" style="font-size: 1.5rem;">{subtitle}</h3>', unsafe_allow_html=True)
+        
+        # Add separator line
+        st.markdown('<hr style="margin: 1rem 0; border-color: #CCCCCC;">', unsafe_allow_html=True)
+    
+    return header_container
+
+# 2. Sidebar Component
+def create_sidebar(
+    on_file_upload: Callable[[Optional[UploadedFile], Optional[str]], Any],
+    on_settings_change: Callable[[Dict[str, Any]], Any]
+) -> Dict[str, Any]:
+    """
+    Create a collapsible sidebar with file upload features.
+    This version removes the settings sections and delegates processing to the callback.
+
+    Args:
+        on_file_upload: Callback function expecting either uploaded_file or url keyword argument.
+        on_settings_change: Callback function when search settings change (kept for signature compatibility).
+
+    Returns:
+        An empty dictionary, as settings are removed.
+    """
+    # Apply sidebar collapsed class if needed
+    if st.session_state.sidebar_collapsed:
+        st.markdown('<style>.main .block-container{padding-left: 1rem; max-width: 100%;}</style>', unsafe_allow_html=True)
+    
+    # Sidebar toggle button in main content area (only visible when sidebar is collapsed)
+    if st.session_state.sidebar_collapsed:
+        col1, col2 = st.columns([1, 20])
+        with col1:
+            if st.button("≫", key="expand_sidebar"):
+                st.session_state.sidebar_collapsed = False
+                st.rerun()
+    
+    with st.sidebar:
+        # Toggle button in sidebar
+        if not st.session_state.sidebar_collapsed:
+            if st.button("≪ Collapse Sidebar", key="collapse_sidebar"):
+                st.session_state.sidebar_collapsed = True
+                st.rerun()
+        
+        st.header("Code Upload")
+
+        # File Uploader
+        uploaded_file = st.file_uploader(
+            "Upload a zip archive of your codebase",
+            type=["zip"],
+            key="file_uploader",
+            help="Select the .zip file containing your Python project."
+        )
+
+        # URL Input
+        url = st.text_input(
+            "Or enter a URL to a zip file",
+            key="url_input",
+            placeholder="https://example.com/repo.zip"
+        )
+
+        # Process Button
+        if st.button("Process Codebase", key="process_button", use_container_width=True):
+            if uploaded_file is not None:
+                # Directly call the callback with the uploaded file object
+                with st.spinner("Processing uploaded file..."):
+                    try:
+                        on_file_upload(uploaded_file=uploaded_file, url=None)
+                    except Exception as e:
+                        show_error(f"Error triggering processing for uploaded file: {e}")
+            elif url:
+                # Directly call the callback with the URL
+                with st.spinner("Processing URL..."):
+                    try:
+                        on_file_upload(uploaded_file=None, url=url)
+                    except Exception as e:
+                        show_error(f"Error triggering processing for URL: {e}")
+            else:
+                show_warning("Please upload a zip file or provide a URL.")
+
+        # Return an empty dictionary as no settings are controlled here anymore
+        return {}
+
+# Utility function to create a download link for data
+def get_download_link(data, filename, text):
+    """Generate a download link for data."""
+    b64 = base64.b64encode(data.encode()).decode()
+    href = f'<a href="data:file/txt;base64,{b64}" download="{filename}">{text}</a>'
+    return href 
+
+# Attempt to import pygraphviz for layout
+has_graphviz = False
+try:
+    import pygraphviz
+    from networkx.drawing.nx_agraph import graphviz_layout
+    has_graphviz = True
+except ImportError:
+    print("INFO: PyGraphviz not found. Hierarchical layout ('dot') disabled. Falling back to Spring layout.")
+    # Fallback layout function if graphviz not available
+    def graphviz_layout(G, prog='spring', args=''):
+         # Provide a consistent fallback using spring_layout.
+         print(f"Warning: graphviz_layout called but pygraphviz not found. Using default spring_layout.")
+         return nx.spring_layout(G, seed=42, dim=2, k=1.0, iterations=75)
+
+def create_enhanced_visualization(
+    graph: nx.Graph,
+    communities: Optional[Dict[str, List[str]]] = None,
+    container: Optional[st.container] = None,
+    search_results: Optional[Dict[str, Any]] = None
+):
+    """
+    Create an enhanced visualization using hierarchical layout if available.
+    Focuses on clear edges with arrows, marker nodes, and detailed hover info.
+    """
+    global has_graphviz
+    
+    if container is None:
+        pass # Render in current context
+    else:
+        # This context manager might cause issues if container is None
+        # It's generally better to call st elements directly or check container first
+        # For simplicity, assuming rendering happens in the main flow if container is None
+        pass
+
+    if graph is None or len(graph.nodes) == 0:
+        st.warning("No graph data available to visualize.")
+        return
+
+    try:
+        # --- Layout (Hierarchical if possible, else Spring) --- 
+        progress_msg = st.empty()
+        progress_msg.info("Calculating graph layout...")
+        pos = None
+        if has_graphviz:
+            try:
+                # Use 'dot' for hierarchical layout
+                pos = graphviz_layout(graph, prog='dot') 
+            except Exception as e_gv:
+                st.warning(f"Graphviz layout failed ({e_gv}), falling back to Spring layout.")
+                has_graphviz = False # Disable further attempts if it fails once
+        
+        if pos is None: # Fallback if graphviz failed or wasn't available
+             try:
+                 pos = nx.spring_layout(graph, dim=2, k=1.0, iterations=75, seed=42) 
+             except Exception as e_spring:
+                 st.error(f"Spring layout calculation failed: {e_spring}")
+                 progress_msg.empty()
+                 return
+        progress_msg.empty()
+
+        # --- Colors (Pastel based on Node Type) --- 
+        node_types = sorted(list(set(d.get('type', 'Unknown') for n, d in graph.nodes(data=True))))
+        pastel_colors = px.colors.qualitative.Pastel
+        type_color_map = {ntype: pastel_colors[i % len(pastel_colors)] for i, ntype in enumerate(node_types)}
+
+        # --- Edge Trace (Lines) --- 
+        edge_x = []
+        edge_y = []
+        edge_hover_texts = []
+        edge_midpoints = [] # For potential future label placement or interaction
+        
+        for u, v, data in graph.edges(data=True):
+            if u in pos and v in pos:
+                x0, y0 = pos[u]
+                x1, y1 = pos[v]
+                edge_x.extend([x0, x1, None])
+                edge_y.extend([y0, y1, None])
+                # Calculate midpoint for potential use
+                edge_midpoints.append(((x0+x1)/2, (y0+y1)/2))
+                
+                # Create hover text for the edge
+                rel_type = data.get('type', 'Unknown')
+                strength = data.get('strength', '')
+                description = data.get('description', '')
+                hover_info = f"<b>Type: {rel_type}</b>"
+                if strength: hover_info += f"<br>Strength: {strength}"
+                if description: hover_info += f"<br>Desc: {description[:100]}{'...' if len(description)>100 else ''}"
+                edge_hover_texts.extend([hover_info, hover_info, ''])
+            else:
+                 edge_hover_texts.extend(['', '', ''])
+                 edge_midpoints.append((None, None)) # Add placeholder
+
+        edge_trace = go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=1.5, color='#888888'), # Darker, slightly thicker edges
+            hoverinfo='text',
+            hovertext=edge_hover_texts,
+            mode='lines'
+        )
+
+        # --- Node Trace (Markers only) --- 
+        node_x = []
+        node_y = []
+        node_hover_texts = []
+        node_colors = []
+        node_sizes = []
+        for node, data in graph.nodes(data=True):
+            if node in pos:
+                x, y = pos[node]
+                node_x.append(x)
+                node_y.append(y)
+
+                # Node Color & Size
+                node_type = data.get('type', 'Unknown')
+                node_colors.append(type_color_map.get(node_type, '#ABABAB')) 
+                degree = graph.degree(node)
+                node_sizes.append(max(10, min(12 + degree * 2, 35))) # Adjusted size slightly
+                
+                # Node Hover Text (ensure it's comprehensive)
+                node_name = data.get('name', str(node))
+                hover_info = f"<b>{node_name}</b><br>Type: {node_type}<br>" 
+                hover_info += f"File: {data.get('source_file', '?')}:{data.get('lineno', '?')}<br>"
+                if 'description' in data and data['description'] and data['description'] != "No description available":
+                    hover_info += f"Desc: {data.get('description', '')}<br>"
+                code_snippet = data.get('code_snippet', '')
+                max_snippet_len = 400 # Allow slightly longer snippet on hover
+                if code_snippet:
+                     hover_info += f"<br>--- Code ---<br><pre style='white-space: pre-wrap; word-wrap: break-word;'>{code_snippet[:max_snippet_len].replace('\n','<br>')}{'...' if len(code_snippet)>max_snippet_len else ''}</pre>"
+                node_hover_texts.append(hover_info)
+
+        node_trace = go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers', # Markers only, no persistent text labels
+            hovertext=node_hover_texts, 
+            hoverinfo='text',
+            marker=dict(
+                color=node_colors,
+                size=node_sizes,
+                opacity=0.9, # Slightly more opaque
+                line=dict(width=1, color='#FFFFFF') # White border for contrast
+            )
+        )
+
+        # --- Layout --- 
+        layout = go.Layout(
+            title='Code Knowledge Graph',
+            titlefont_size=16,
+            showlegend=False,
+            hovermode='closest',
+            margin=dict(b=10,l=5,r=5,t=40),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False), 
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False), 
+            plot_bgcolor='#FFFFFF', 
+            paper_bgcolor='#FFFFFF',
+            height=750, # Increased height slightly
+        )
+        
+        # --- Create List for Edge Arrows --- 
+        arrow_annotations = [] # Initialize an empty LIST
+        arrow_scale = 0.03 # Adjust scale based on graph size/zoom
+        arrow_color = '#888888'
+        arrow_width = 1.5
+        
+        for i, (u, v) in enumerate(graph.edges()):
+             if u in pos and v in pos:
+                 x0, y0 = pos[u]
+                 x1, y1 = pos[v]
+                 # Calculate angle and endpoint for arrowhead
+                 angle = np.arctan2(y1 - y0, x1 - x0)
+                 # Place arrow slightly before the target node
+                 node_size_target = max(8, min(12 + graph.degree(v) * 2, 35)) / 2 # Approx radius
+                 # Adjust arrow placement based on layout scale - this needs tuning!
+                 layout_scale = max(np.ptp(node_x), np.ptp(node_y)) if node_x else 1 # Estimate plot scale
+                 offset = min(arrow_scale * layout_scale, np.sqrt((x1-x0)**2 + (y1-y0)**2)*0.3) # Don't overshoot midpoint
+                 
+                 arrow_x = x1 - offset * np.cos(angle)
+                 arrow_y = y1 - offset * np.sin(angle)
+
+                 # Add arrow annotation DICTIONARY to the LIST
+                 arrow_annotations.append(
+                     go.layout.Annotation(
+                         ax=x0, ay=y0, 
+                         x=arrow_x, y=arrow_y,
+                         xref='x', yref='y',
+                         showarrow=True,
+                         axref='x', ayref='y',
+                         arrowhead=2, 
+                         arrowsize=1, 
+                         arrowwidth=arrow_width,
+                         arrowcolor=arrow_color
+                     )
+                 )
+        
+        # --- Assign the completed list to the layout --- 
+        layout.annotations = arrow_annotations
+
+        # --- Figure --- 
+        fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
+
+        # --- Configuration --- 
+        config = {
+            'displayModeBar': True, 
+            'scrollZoom': True,
+            'displaylogo': False,
+             'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'toggleSpikelines']
+        }
+        
+        # Display the graph
+        st.plotly_chart(fig, use_container_width=True, config=config)
+        
+        # Display simple legend for node types below the graph
+        st.write("**Node Colors (Type):**")
+        # Use columns for a cleaner legend layout
+        max_legend_cols = 5 
+        cols = st.columns(min(max_legend_cols, len(type_color_map))) 
+        i = 0
+        # Sort types for consistent legend order
+        for ntype in sorted(type_color_map.keys()):
+            color = type_color_map[ntype]
+            with cols[i % len(cols)]:
+                # Use markdown for colored circle and text
+                st.markdown(f'<span style="display:inline-block; width:12px; height:12px; background-color:{color}; border-radius:50%; margin-right:5px; border: 1px solid #ccc;"></span> {ntype}', unsafe_allow_html=True)
+            i += 1
+
+    except Exception as e:
+        st.error(f"Error generating enhanced visualization: {e}")
+        st.exception(e) # Show full traceback for debugging
+
+# Enhanced visualization modes
+def create_artistic_graph_visualization(
+    graph: nx.Graph,
+    communities: Optional[Dict[str, List[str]]] = None,
+    container: Optional[st.container] = None,
+    max_nodes: int = 200,
+    view_mode: str = "artistic"
+):
+    """
+    Create an artistic, flowing network visualization similar to high-end graph tools.
+    
+    Args:
+        graph: NetworkX graph to visualize
+        communities: Optional dictionary of communities
+        container: Streamlit container to render in
+        max_nodes: Maximum number of nodes to display
+        view_mode: Visualization mode
+    """
+    # Use st.container if no container provided to ensure there's a place to render
+    if container is None:
+        container = st.container()
+
+    # Early check for empty graph
+    if graph is None or len(graph.nodes) == 0:
+        with container:
+            st.warning("No graph data available to visualize. Please process a codebase first.")
+        return None, None
+    
+    try:
+        with container:
+            # Create a spinner to indicate loading
+            with st.spinner("Generating artistic visualization..."):
+                # Add a progress message
+                progress_msg = st.empty()
+                progress_msg.info("Initializing visualization...")
+                
+                # Sample nodes if graph is too large
+                if len(graph.nodes) > max_nodes:
+                    progress_msg.info(f"Sampling {max_nodes} nodes from {len(graph.nodes)} total nodes...")
+                    # Ensure we select nodes with diverse types for a better visualization
+                    node_types = {}
+                    for node, data in graph.nodes(data=True):
+                        node_type = data.get('type', 'unknown')
+                        if node_type not in node_types:
+                            node_types[node_type] = []
+                        node_types[node_type].append(node)
+                    
+                    # Sample nodes from each type to ensure diversity
+                    nodes_to_include = []
+                    
+                    # Calculate how many to take from each type
+                    num_types = len(node_types)
+                    nodes_per_type = max(2, int(max_nodes / (num_types or 1)))
+                    
+                    for node_type, nodes in node_types.items():
+                        # Take a sample from each type, ensuring at least some representation
+                        sample_size = min(len(nodes), nodes_per_type)
+                        nodes_to_include.extend(random.sample(nodes, sample_size))
+                    
+                    # If we haven't reached max_nodes, add random nodes
+                    if len(nodes_to_include) < max_nodes:
+                        remaining_nodes = [n for n in graph.nodes() if n not in nodes_to_include]
+                        additional_sample = min(max_nodes - len(nodes_to_include), len(remaining_nodes))
+                        if additional_sample > 0:
+                            nodes_to_include.extend(random.sample(remaining_nodes, additional_sample))
+                            
+                    subgraph = graph.subgraph(nodes_to_include)
+                else:
+                    subgraph = graph
+                
+                progress_msg.info("Generating layout...")
+                
+                # Set a seed for deterministic layout
+                random.seed(42)
+                np.random.seed(42)
+                
+                # Generate a force-directed layout
+                # Using Fruchterman-Reingold algorithm for a more natural, flowing layout
+                pos = nx.fruchterman_reingold_layout(subgraph, dim=3, k=0.5, seed=42)
+                
+                progress_msg.info("Creating node styles...")
+                
+                # Prepare node colors based on communities or types
+                node_colors = []
+                node_sizes = []
+                node_symbols = []
+                
+                # Use a vibrant color palette similar to the image
+                color_palette = [
+                    '#FF3EA5', '#FF9E00', '#00C2FF', '#00FF88', '#AA44FF', 
+                    '#FFFF00', '#FF0000', '#0088FF', '#8BFF00', '#FF00FF',
+                    '#00FFFF', '#FF7700', '#00FF44', '#8800FF', '#00BBFF'
+                ]
+                
+                # Assign colors based on node types or communities
+                type_to_color = {}
+                
+                for node in subgraph.nodes():
+                    node_data = subgraph.nodes[node]
+                    
+                    # Determine node type (default to 'unknown')
+                    node_type = node_data.get('type', 'unknown')
+                    
+                    # Assign color based on type
+                    if node_type not in type_to_color:
+                        type_to_color[node_type] = color_palette[len(type_to_color) % len(color_palette)]
+                    
+                    node_color = type_to_color[node_type]
+                    node_colors.append(node_color)
+                    
+                    # Determine node size based on its importance (degree)
+                    degree = subgraph.degree[node]
+                    node_size = 10 + (degree * 2)  # Scale size based on degree
+                    node_sizes.append(min(node_size, 40))  # Cap maximum size
+                    
+                    # Vary node symbols for visual interest
+                    symbols = ['circle', 'diamond', 'square', 'cross']
+                    if 'Class' in node_type:
+                        node_symbols.append('circle')
+                    elif 'Function' in node_type:
+                        node_symbols.append('diamond')
+                    elif 'Module' in node_type:
+                        node_symbols.append('square')
+                    else:
+                        node_symbols.append(random.choice(symbols))
+                
+                progress_msg.info("Creating edge traces...")
+                
+                # Create edge traces with gradient colors based on connected nodes
+                edge_traces = []
+                
+                for edge in subgraph.edges():
+                    if edge[0] in pos and edge[1] in pos:  # Ensure nodes are in layout
+                        x0, y0, z0 = pos[edge[0]]
+                        x1, y1, z1 = pos[edge[1]]
+                        
+                        # Create color gradient for edge based on connected nodes
+                        color_a = node_colors[list(subgraph.nodes).index(edge[0])]
+                        color_b = node_colors[list(subgraph.nodes).index(edge[1])]
+                        
+                        # Create separate segments to create a gradient-like effect
+                        # We'll use 2 segments with different colors to simulate a gradient
+                        
+                        # First half of the edge - color_a
+                        points_first_half = 8  # Fewer points for performance
+                        xs1, ys1, zs1 = [], [], []
+                        for i in range(points_first_half):
+                            t = i / (points_first_half - 1)
+                            xs1.append(x0 + t * (x1 - x0) / 2)
+                            ys1.append(y0 + t * (y1 - y0) / 2)
+                            zs1.append(z0 + t * (z1 - z0) / 2)
+
+                        # Second half of the edge - color_b
+                        points_second_half = 8  # Fewer points for performance
+                        xs2, ys2, zs2 = [], [], []
+                        for i in range(points_second_half):
+                            t = i / (points_second_half - 1)
+                            xs2.append(x1 - t * (x1 - x0) / 2)
+                            ys2.append(y1 - t * (y1 - y0) / 2)
+                            zs2.append(z1 - t * (z1 - z0) / 2)
+
+                        # Combine the two halves
+                        xs = xs1 + xs2
+                        ys = ys1 + ys2
+                        zs = zs1 + zs2
+
+                        # Create trace for the edge
+                        edge_traces.append(go.Scatter(
+                            x=xs, y=ys, z=zs,
+                            mode='lines',
+                            line=dict(width=1.5, color=f'rgba({color_a[0]}, {color_a[1]}, {color_a[2]}, 0.5)'),
+                            hoverinfo='none'
+                        ))
+
+                # Create a combined trace for all edge traces
+                edge_trace = go.Scatter(
+                    x=[], y=[], z=[],
+                    mode='lines',
+                    line=dict(width=1.5, color='#888888'),
+                    hoverinfo='none'
+                )
+
+                for trace in edge_traces:
+                    edge_trace['x'] += trace['x']
+                    edge_trace['y'] += trace['y']
+                    edge_trace['z'] += trace['z']
+
+                # --- Node Trace (Markers only) --- 
+                node_x = []
+                node_y = []
+                node_hover_texts = []
+                node_colors = []
+                node_sizes = []
+                for node, data in graph.nodes(data=True):
+                    if node in pos:
+                        x, y = pos[node]
+                        node_x.append(x)
+                        node_y.append(y)
+
+                        # Node Color & Size
+                        node_type = data.get('type', 'Unknown')
+                        node_colors.append(type_color_map.get(node_type, '#ABABAB')) 
+                        degree = graph.degree(node)
+                        node_sizes.append(max(10, min(12 + degree * 2, 35))) # Adjusted size slightly
+                        
+                        # Node Hover Text (ensure it's comprehensive)
+                        node_name = data.get('name', str(node))
+                        hover_info = f"<b>{node_name}</b><br>Type: {node_type}<br>" 
+                        hover_info += f"File: {data.get('source_file', '?')}:{data.get('lineno', '?')}<br>"
+                        if 'description' in data and data['description'] and data['description'] != "No description available":
+                            hover_info += f"Desc: {data.get('description', '')}<br>"
+                        code_snippet = data.get('code_snippet', '')
+                        max_snippet_len = 400 # Allow slightly longer snippet on hover
+                        if code_snippet:
+                             hover_info += f"<br>--- Code ---<br><pre style='white-space: pre-wrap; word-wrap: break-word;'>{code_snippet[:max_snippet_len].replace('\n','<br>')}{'...' if len(code_snippet)>max_snippet_len else ''}</pre>"
+                        node_hover_texts.append(hover_info)
+
+                node_trace = go.Scatter(
+                    x=node_x, y=node_y,
+                    mode='markers', # Markers only, no persistent text labels
+                    hovertext=node_hover_texts, 
+                    hoverinfo='text',
+                    marker=dict(
+                        color=node_colors,
+                        size=node_sizes,
+                        opacity=0.9, # Slightly more opaque
+                        line=dict(width=1, color='#FFFFFF') # White border for contrast
+                    )
+                )
+
+                # --- Layout --- 
+                layout = go.Layout(
+                    title='Code Knowledge Graph',
+                    titlefont_size=16,
+                    showlegend=False,
+                    hovermode='closest',
+                    margin=dict(b=10,l=5,r=5,t=40),
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False), 
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False), 
+                    plot_bgcolor='#FFFFFF', 
+                    paper_bgcolor='#FFFFFF',
+                    height=750, # Increased height slightly
+                )
+                
+                # --- Create List for Edge Arrows --- 
+                arrow_annotations = [] # Initialize an empty LIST
+                arrow_scale = 0.03 # Adjust scale based on graph size/zoom
+                arrow_color = '#888888'
+                arrow_width = 1.5
+                
+                for i, (u, v) in enumerate(graph.edges()):
+                     if u in pos and v in pos:
+                         x0, y0 = pos[u]
+                         x1, y1 = pos[v]
+                         # Calculate angle and endpoint for arrowhead
+                         angle = np.arctan2(y1 - y0, x1 - x0)
+                         # Place arrow slightly before the target node
+                         node_size_target = max(8, min(12 + graph.degree(v) * 2, 35)) / 2 # Approx radius
+                         # Adjust arrow placement based on layout scale - this needs tuning!
+                         layout_scale = max(np.ptp(node_x), np.ptp(node_y)) if node_x else 1 # Estimate plot scale
+                         offset = min(arrow_scale * layout_scale, np.sqrt((x1-x0)**2 + (y1-y0)**2)*0.3) # Don't overshoot midpoint
+                         
+                         arrow_x = x1 - offset * np.cos(angle)
+                         arrow_y = y1 - offset * np.sin(angle)
+
+                         # Add arrow annotation DICTIONARY to the LIST
+                         arrow_annotations.append(
+                             go.layout.Annotation(
+                                 ax=x0, ay=y0, 
+                                 x=arrow_x, y=arrow_y,
+                                 xref='x', yref='y',
+                                 showarrow=True,
+                                 axref='x', ayref='y',
+                                 arrowhead=2, 
+                                 arrowsize=1, 
+                                 arrowwidth=arrow_width,
+                                 arrowcolor=arrow_color
+                             )
+                         )
+                
+                # --- Assign the completed list to the layout --- 
+                layout.annotations = arrow_annotations
+
+                # --- Figure --- 
+                fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
+
+                # --- Configuration --- 
+                config = {
+                    'displayModeBar': True, 
+                    'scrollZoom': True,
+                    'displaylogo': False,
+                     'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'toggleSpikelines']
+                }
+                
+                # Display the graph
+                st.plotly_chart(fig, use_container_width=True, config=config)
+                
+                # Display simple legend for node types below the graph
+                st.write("**Node Colors (Type):**")
+                # Use columns for a cleaner legend layout
+                max_legend_cols = 5 
+                cols = st.columns(min(max_legend_cols, len(type_color_map))) 
+                i = 0
+                # Sort types for consistent legend order
+                for ntype in sorted(type_color_map.keys()):
+                    color = type_color_map[ntype]
+                    with cols[i % len(cols)]:
+                        # Use markdown for colored circle and text
+                        st.markdown(f'<span style="display:inline-block; width:12px; height:12px; background-color:{color}; border-radius:50%; margin-right:5px; border: 1px solid #ccc;"></span> {ntype}', unsafe_allow_html=True)
+                    i += 1
+
+    except Exception as e:
+        st.error(f"Error generating artistic visualization: {e}")
+        st.exception(e) # Show full traceback for debugging
+
+    return None, None

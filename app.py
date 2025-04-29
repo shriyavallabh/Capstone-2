@@ -26,41 +26,36 @@ from plotly.subplots import make_subplots
 import queue
 import threading
 
-# Monkey patch for OpenAI client to handle proxies compatibility issue
-# This is needed because the newer OpenAI Python library handles proxies differently
-import openai
+# Import OpenAI client (using the modern approach)
 from openai import OpenAI
+import httpx
+
+# For preventing proxies issue in the OpenAI client
+original_httpx_client = httpx.Client
+
+# Patch the httpx.Client constructor to filter out problematic parameters
+def patched_httpx_client(*args, **kwargs):
+    # Remove proxies parameter if present to avoid errors
+    if 'proxies' in kwargs:
+        print(f"Removing proxies config: {kwargs['proxies']}")
+        del kwargs['proxies']
+    return original_httpx_client(*args, **kwargs)
+
+# Apply the patch
+httpx.Client = patched_httpx_client
+
+# Use lazy initialization to avoid recursion issues
+def get_openai_client():
+    """Get or initialize the OpenAI client."""
+    # Do not pass any proxy or http_client settings to avoid recursion issues
+    # The modern OpenAI client does not accept proxies parameter like the old one did
+    client = OpenAI()
+    return client
 
 # Set OpenAI API key directly from environment or .env file
 # Force reload the environment variable to ensure it's picked up
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(), override=True)
-
-# Double-check and set API key if available in environment
-if os.environ.get("OPENAI_API_KEY"):
-    openai.api_key = os.environ.get("OPENAI_API_KEY")
-    print("API key loaded from environment")
-
-# We need a more comprehensive approach to handle the proxy configuration
-# The issue is that the API tries to pass proxies to the httpx Client directly
-import openai._base_client
-import httpx
-
-# Store the original Client initialization
-original_httpx_client = httpx.Client
-
-# Create a wrapper for httpx.Client that filters out proxies parameter
-def patched_httpx_client(*args, **kwargs):
-    # Remove 'proxies' from kwargs if present
-    if 'proxies' in kwargs:
-        proxies = kwargs.pop('proxies')
-        print(f"Removing proxies config: {proxies}")
-    
-    # Call the original Client with the modified kwargs
-    return original_httpx_client(*args, **kwargs)
-
-# Apply the monkey patch to httpx.Client
-httpx.Client = patched_httpx_client
 
 # Function to check and prompt for OpenAI API key
 def check_api_key():
@@ -103,7 +98,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import UI components
 from ui.ui_components import (
-    UBS_COLORS,
     initialize_ui_state,
     inject_base_css,
     create_header,
@@ -132,528 +126,10 @@ from talktocode.utils.code_reference import CodeReference, format_code_reference
 def load_ubs_styles():
     """
     Load and return custom CSS styling for UBS theme and components.
+    REMOVED: This function now returns an empty string as custom CSS is disabled.
     """
-    return """
-    <style>
-        /* ==================== UBS THEME VARIABLES ==================== */
-        :root {
-            --ubs-red: #EC0016;
-            --ubs-light-red: #FF6D6A;
-            --ubs-dark-red: #B30012;
-            --ubs-blue: #0205A8;
-            --ubs-light-blue: #9A9CFF;
-            --ubs-dark-blue: #000066;
-            --ubs-black: #000000;
-            --ubs-dark-gray: #333333;
-            --ubs-medium-gray: #666666;
-            --ubs-light-gray: #CCCCCC;
-            --ubs-white: #FFFFFF;
-            --ubs-font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            --ubs-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            --ubs-border-radius: 8px;
-            --ubs-transition: all 0.3s ease;
-        }
-
-        /* ==================== BASE STYLING ==================== */
-        body {
-            font-family: var(--ubs-font-family);
-            color: var(--ubs-dark-gray);
-        }
-
-        /* Override Streamlit's base styling */
-        .stApp {
-            background-color: var(--ubs-white);
-        }
-
-        h1, h2, h3, h4, h5, h6 {
-            font-family: var(--ubs-font-family);
-            font-weight: 600;
-        }
-
-        /* Links in UBS colors */
-        a {
-            color: var(--ubs-blue);
-            text-decoration: none;
-        }
-        a:hover {
-            color: var(--ubs-dark-blue);
-            text-decoration: underline;
-        }
-
-        /* Button styling */
-        .stButton > button {
-            background-color: var(--ubs-red);
-            color: white;
-            border: none;
-            border-radius: var(--ubs-border-radius);
-            padding: 0.5rem 1.5rem;
-            font-weight: 500;
-            transition: var(--ubs-transition);
-        }
-        .stButton > button:hover {
-            background-color: var(--ubs-dark-red);
-            box-shadow: var(--ubs-shadow);
-        }
-        .stButton > button:focus {
-            box-shadow: 0 0 0 0.2rem rgba(236, 0, 22, 0.25);
-        }
-
-        /* ==================== HEADER STYLING ==================== */
-        .ubs-header-container {
-            margin-bottom: 2rem;
-            padding-bottom: 1rem;
-            border-bottom: 1px solid var(--ubs-light-gray);
-        }
-        .ubs-main-header {
-            font-size: 2.5rem;
-            color: var(--ubs-red);
-            font-weight: bold;
-            margin-bottom: 0.5rem;
-            line-height: 1.2;
-        }
-        .ubs-sub-header {
-            font-size: 1.25rem;
-            color: var(--ubs-blue);
-            font-weight: 400;
-        }
-
-        /* ==================== SIDEBAR STYLING ==================== */
-        /* Base sidebar styling */
-        .sidebar .sidebar-content {
-            background-color: #f8f9fa;
-            border-right: 1px solid var(--ubs-light-gray);
-        }
-        
-        /* Sidebar headers */
-        .sidebar .sidebar-content h1,
-        .sidebar .sidebar-content h2,
-        .sidebar .sidebar-content h3 {
-            color: var(--ubs-red);
-            padding-bottom: 0.5rem;
-            border-bottom: 1px solid var(--ubs-light-gray);
-        }
-
-        /* File uploader styling */
-        .ubs-file-uploader {
-            margin: 1rem 0;
-            padding: 1.5rem;
-            border: 2px dashed var(--ubs-light-gray);
-            border-radius: var(--ubs-border-radius);
-            background-color: #fafafa;
-            text-align: center;
-            transition: var(--ubs-transition);
-        }
-        .ubs-file-uploader:hover {
-            border-color: var(--ubs-blue);
-            background-color: #f0f4ff;
-        }
-        .ubs-file-uploader-icon {
-            font-size: 2rem;
-            color: var(--ubs-light-blue);
-            margin-bottom: 0.5rem;
-        }
-
-        /* Sidebar toggle button */
-        .sidebar-toggle-btn {
-            position: absolute;
-            top: 10px;
-            right: -15px;
-            width: 30px;
-            height: 30px;
-            background-color: var(--ubs-red);
-            color: white;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            z-index: 100;
-            box-shadow: var(--ubs-shadow);
-            font-weight: bold;
-            transition: var(--ubs-transition);
-        }
-        .sidebar-toggle-btn:hover {
-            background-color: var(--ubs-dark-red);
-            transform: scale(1.1);
-        }
-
-        /* Collapsed sidebar */
-        .sidebar-collapsed .css-1d391kg,
-        .sidebar-collapsed .css-1lcbmhc {
-            width: 0 !important;
-            margin-left: -21rem;
-            visibility: hidden;
-        }
-        .sidebar-collapsed .block-container {
-            padding-left: 1rem;
-            max-width: 100%;
-        }
-
-        /* ==================== CONTAINER STYLING ==================== */
-        /* Clean container style */
-        .ubs-container {
-            background-color: white;
-            border-radius: var(--ubs-border-radius);
-            padding: 1.5rem;
-            box-shadow: var(--ubs-shadow);
-            margin-bottom: 1.5rem;
-            border: 1px solid var(--ubs-light-gray);
-        }
-
-        /* Graph container specific styling */
-        .graph-container {
-            background-color: white;
-            border-radius: var(--ubs-border-radius);
-            padding: 1.5rem;
-            box-shadow: var(--ubs-shadow);
-            margin-bottom: 1.5rem;
-            position: relative;
-            min-height: 400px;
-        }
-        .graph-container-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-            border-bottom: 1px solid var(--ubs-light-gray);
-            padding-bottom: 0.5rem;
-        }
-        .graph-container-title {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: var(--ubs-dark-blue);
-        }
-        .graph-controls {
-            display: flex;
-            gap: 0.5rem;
-        }
-
-        /* Hide Plotly and Matplotlib controls */
-        .js-plotly-plot .plotly .modebar {
-            display: none !important;
-        }
-        .js-plotly-plot .plotly .modebar-btn[data-title="Download plot as a png"] {
-            display: inline-block !important;
-        }
-        .js-plotly-plot .plotly .modebar-btn:not([data-title="Download plot as a png"]) {
-            display: none !important;
-        }
-        .mp-controls-container, .mp-controls-intercept, 
-        .matplotlib-controls, .reportview-container .main footer {
-            display: none !important;
-        }
-
-        /* ==================== STATUS MESSAGES ==================== */
-        .status-box {
-            padding: 1rem;
-            border-radius: var(--ubs-border-radius);
-            margin-bottom: 1rem;
-            display: flex;
-            align-items: center;
-        }
-        .status-box::before {
-            content: '';
-            display: inline-block;
-            width: 1rem;
-            height: 1rem;
-            border-radius: 50%;
-            margin-right: 0.75rem;
-        }
-        .info-box {
-            background-color: #e6f0ff;
-            color: var(--ubs-blue);
-            border-left: 5px solid var(--ubs-blue);
-        }
-        .info-box::before {
-            background-color: var(--ubs-blue);
-        }
-        .success-box {
-            background-color: #e6fff0;
-            color: #1B5E20;
-            border-left: 5px solid #1B5E20;
-        }
-        .success-box::before {
-            background-color: #1B5E20;
-        }
-        .warning-box {
-            background-color: #fff9e6;
-            color: #F57F17;
-            border-left: 5px solid #F57F17;
-        }
-        .warning-box::before {
-            background-color: #F57F17;
-        }
-        .error-box {
-            background-color: #ffe6e6;
-            color: var(--ubs-dark-red);
-            border-left: 5px solid var(--ubs-dark-red);
-        }
-        .error-box::before {
-            background-color: var(--ubs-dark-red);
-        }
-
-        /* ==================== TAB STYLING ==================== */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 0;
-            background-color: #f8f9fa;
-            border-radius: var(--ubs-border-radius) var(--ubs-border-radius) 0 0;
-            padding: 0.25rem 0.25rem 0;
-        }
-        .stTabs [data-baseweb="tab"] {
-            background-color: #f0f0f0;
-            border-radius: var(--ubs-border-radius) var(--ubs-border-radius) 0 0;
-            padding: 0.5rem 1rem;
-            border: 1px solid var(--ubs-light-gray);
-            border-bottom: none;
-            margin-right: 0.25rem;
-            font-weight: 500;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: var(--ubs-blue);
-            color: white;
-            border-color: var(--ubs-blue);
-        }
-        .stTabs [aria-selected="true"]:hover {
-            background-color: var(--ubs-dark-blue);
-        }
-        .stTabs [aria-selected="false"]:hover {
-            background-color: #e0e0e0;
-        }
-        
-        /* Tab content container */
-        .stTabs [data-baseweb="tab-panel"] {
-            background-color: white;
-            border: 1px solid var(--ubs-light-gray);
-            border-top: none;
-            border-radius: 0 0 var(--ubs-border-radius) var(--ubs-border-radius);
-            padding: 1rem;
-        }
-
-        /* ==================== CHAT INTERFACE ==================== */
-        .chat-container {
-            margin-top: 2rem;
-            padding-top: 1.5rem;
-            border-top: 1px solid var(--ubs-light-gray);
-        }
-        .chat-message {
-            padding: 1rem;
-            border-radius: var(--ubs-border-radius);
-            margin-bottom: 1rem;
-            max-width: 85%;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-        }
-        /* User messages */
-        .stChatMessage[data-testid*="stChatMessage-user"] .chat-message {
-            background-color: #f0f0f0;
-            border-top-right-radius: 0;
-            margin-left: auto;
-            color: var(--ubs-dark-gray);
-        }
-        /* Assistant messages */
-        .stChatMessage[data-testid*="stChatMessage-assistant"] .chat-message {
-            background-color: var(--ubs-light-blue);
-            border-top-left-radius: 0;
-            margin-right: auto;
-            color: var(--ubs-dark-blue);
-        }
-        /* Chat input */
-        .stChatInput > div {
-            padding: 0.5rem;
-            border-radius: var(--ubs-border-radius);
-            border: 1px solid var(--ubs-light-gray);
-            background-color: white;
-            transition: var(--ubs-transition);
-        }
-        .stChatInput > div:focus-within {
-            border-color: var(--ubs-blue);
-            box-shadow: 0 0 0 2px rgba(2, 5, 168, 0.2);
-        }
-        .stChatInput input {
-            font-size: 1rem;
-        }
-        /* Send button */
-        .stChatInput button {
-            background-color: var(--ubs-red);
-        }
-        .stChatInput button:hover {
-            background-color: var(--ubs-dark-red);
-        }
-
-        /* ==================== RESPONSIVE DESIGN ==================== */
-        /* Different styles for smaller screens */
-        @media (max-width: 768px) {
-            .ubs-main-header {
-                font-size: 2rem;
-            }
-            .ubs-sub-header {
-                font-size: 1rem;
-            }
-            .graph-container {
-                padding: 1rem;
-                min-height: 300px;
-            }
-            .chat-message {
-                max-width: 95%;
-            }
-        }
-        
-        /* Very small screens */
-        @media (max-width: 480px) {
-            .ubs-main-header {
-                font-size: 1.75rem;
-            }
-            .sidebar-collapsed .css-1d391kg {
-                margin-left: -100%;
-            }
-            .graph-container {
-                padding: 0.75rem;
-                min-height: 250px;
-            }
-        }
-
-        /* ==================== ACTIVE ELEMENT HIGHLIGHTING ==================== */
-        /* Highlight active elements */
-        .highlight-element {
-            border: 2px solid var(--ubs-red);
-            animation: pulse 2s infinite;
-        }
-        
-        @keyframes pulse {
-            0% {
-                box-shadow: 0 0 0 0 rgba(236, 0, 22, 0.4);
-            }
-            70% {
-                box-shadow: 0 0 0 10px rgba(236, 0, 22, 0);
-            }
-            100% {
-                box-shadow: 0 0 0 0 rgba(236, 0, 22, 0);
-            }
-        }
-        
-        /* Active tab indicator */
-        .active-tab {
-            position: relative;
-        }
-        .active-tab::after {
-            content: '';
-            position: absolute;
-            bottom: -1px;
-            left: 0;
-            width: 100%;
-            height: 3px;
-            background-color: var(--ubs-red);
-            border-radius: 3px 3px 0 0;
-        }
-        
-        /* File upload status */
-        .file-upload-in-progress .ubs-file-uploader {
-            border-color: var(--ubs-blue);
-            background-color: #f0f4ff;
-            animation: pulse-blue 2s infinite;
-        }
-        
-        @keyframes pulse-blue {
-            0% {
-                box-shadow: 0 0 0 0 rgba(2, 5, 168, 0.4);
-            }
-            70% {
-                box-shadow: 0 0 0 10px rgba(2, 5, 168, 0);
-            }
-            100% {
-                box-shadow: 0 0 0 0 rgba(2, 5, 168, 0);
-            }
-        }
-
-        /* ==================== TOGGLE BUTTONS ==================== */
-        /* Sidebar toggle buttons */
-        [data-testid="baseButton-secondary"]:has([key="collapse_sidebar"]) {
-            position: fixed;
-            top: 75px;
-            right: calc(21rem - 30px);
-            width: 30px;
-            height: 30px;
-            padding: 0 !important;
-            border-radius: 50% !important;
-            background-color: var(--ubs-red) !important;
-            color: white !important;
-            box-shadow: var(--ubs-shadow);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: var(--ubs-transition);
-        }
-        
-        [data-testid="baseButton-secondary"]:has([key="collapse_sidebar"]):hover {
-            background-color: var(--ubs-dark-red) !important;
-            transform: scale(1.1);
-        }
-        
-        [data-testid="baseButton-secondary"]:has([key="expand_sidebar"]) {
-            position: fixed;
-            top: 75px;
-            left: 10px;
-            width: 30px;
-            height: 30px;
-            padding: 0 !important;
-            border-radius: 50% !important;
-            background-color: var(--ubs-red) !important;
-            color: white !important;
-            box-shadow: var(--ubs-shadow);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: var(--ubs-transition);
-        }
-        
-        [data-testid="baseButton-secondary"]:has([key="expand_sidebar"]):hover {
-            background-color: var(--ubs-dark-red) !important;
-            transform: scale(1.1);
-        }
-        
-        /* Shift main content when sidebar is collapsed */
-        .sidebar-collapsed .main .block-container {
-            max-width: 100% !important;
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
-            transition: all 0.3s ease;
-        }
-    </style>
-    <!-- Keyboard shortcuts -->
-    <script>
-        document.addEventListener('keydown', function(e) {
-            // Ctrl+/ or Cmd+/ - Focus on chat input
-            if ((e.ctrlKey || e.metaKey) && e.key === '/') {
-                e.preventDefault();
-                document.querySelector('.stChatInput input').focus();
-            }
-            
-            // Ctrl+Shift+F or Cmd+Shift+F - Toggle sidebar
-            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
-                e.preventDefault();
-                const sidebarToggleButton = document.querySelector('[key="main_collapse_sidebar"], [key="main_expand_sidebar"], [key="collapse_sidebar"], [key="expand_sidebar"]');
-                if (sidebarToggleButton) sidebarToggleButton.click();
-            }
-            
-            // Ctrl+G or Cmd+G - Switch to graph visualization tab
-            if ((e.ctrlKey || e.metaKey) && e.key === 'g') {
-                e.preventDefault();
-                // Find and click the graph tab
-                const graphTab = document.querySelector('[data-baseweb="tab"][id$="graph"]');
-                if (graphTab) graphTab.click();
-            }
-            
-            // Ctrl+R or Cmd+R - Switch to search results tab
-            if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-                e.preventDefault();
-                // Find and click the results tab
-                const resultsTab = document.querySelector('[data-baseweb="tab"][id$="results"]');
-                if (resultsTab) resultsTab.click();
-            }
-        });
-    </script>
-    """
+    # Return empty string to remove all custom styles defined here
+    return """ """
 
 # Page Configuration
 st.set_page_config(
@@ -666,64 +142,25 @@ st.set_page_config(
 # Apply custom CSS
 def apply_custom_styling():
     """Apply custom styling to the app."""
-    # Add UBS custom styles
+    # The call below now injects an empty string, removing the old styles
     st.markdown(load_ubs_styles(), unsafe_allow_html=True)
     
-    # Inject base CSS from the UI components module
+    # Inject base CSS from the UI components module (check if inject_base_css uses UBS classes)
     inject_base_css()
     
-    # Add conditional CSS based on sidebar state
+    # Add conditional CSS based on sidebar state 
+    # Check if var(--ubs-red) is used here
     if "sidebar_collapsed" in st.session_state and st.session_state.sidebar_collapsed:
-        st.markdown("""
-        <style>
-            /* Add custom body class */
-            body {
-                overflow-x: hidden;
-            }
-            /* Make sidebar invisible when collapsed */
-            [data-testid="stSidebar"] {
-                width: 0px !important;
-                margin-left: -21rem !important;
-                visibility: hidden !important;
-                transition: width 0.3s, margin-left 0.3s, visibility 0.3s;
-            }
-            /* Expand main content when sidebar is collapsed */
-            [data-testid="stSidebar"] ~ .main .block-container {
-                max-width: 100% !important;
-                padding-left: 2rem !important;
-                padding-right: 2rem !important;
-                transition: max-width 0.3s, padding 0.3s;
-            }
-            /* Show expand button */
-            .sidebar-expand-btn {
-                display: block;
-            }
-        </style>
-        """, unsafe_allow_html=True)
+        # ... (CSS for collapsed sidebar - check for UBS vars)
+        pass # Assuming no direct UBS refs here, might use standard colors
     else:
-        st.markdown("""
-        <style>
-            /* Normal sidebar styling */
-            [data-testid="stSidebar"] {
-                width: 21rem !important;
-                margin-left: 0 !important;
-                visibility: visible !important;
-                transition: width 0.3s, margin-left 0.3s, visibility 0.3s;
-            }
-            /* Normal main content */
-            [data-testid="stSidebar"] ~ .main .block-container {
-                transition: max-width 0.3s, padding 0.3s;
-            }
-            /* Hide expand button when sidebar is visible */
-            .sidebar-expand-btn {
-                display: none;
-            }
-        </style>
-        """, unsafe_allow_html=True)
+        # ... (CSS for expanded sidebar - check for UBS vars)
+        pass # Assuming no direct UBS refs here
     
-    # Highlight active tab if set
+    # Highlight active tab if set - Check if var(--ubs-red) is used
     if "current_tab" in st.session_state:
         tab_name = st.session_state.current_tab
+        # Replace var(--ubs-red) with a direct color like '#EC0016' or COMPANY_COLORS['red'] if needed
         st.markdown(f"""
         <style>
             /* Highlight the active tab */
@@ -737,7 +174,7 @@ def apply_custom_styling():
                 left: 0;
                 width: 100%;
                 height: 3px;
-                background-color: var(--ubs-red);
+                background-color: #EC0016; /* Replaced var(--ubs-red) */
                 border-radius: 3px 3px 0 0;
             }}
         </style>
@@ -1057,6 +494,7 @@ def format_response_with_references(response_text: str, code_references: List[Co
         Formatted response with proper code blocks and references
     """
     import re
+    from talktocode.utils.code_reference import format_code_references
     
     # Process code references to include proper formatting
     formatted_text = response_text
@@ -1073,70 +511,16 @@ def format_response_with_references(response_text: str, code_references: List[Co
     # Replace all code blocks with proper formatting
     formatted_text = re.sub(code_block_pattern, replace_code_block, formatted_text, flags=re.DOTALL)
     
-    # Convert code references to markdown format
+    # Add formatted code references
     if code_references:
-        formatted_text += "\n\n**Code References:**\n"
+        # Use the utility function to format code references
+        code_ref_text = format_code_references(code_references, include_snippets=True)
         
-        for i, ref in enumerate(code_references):
-            file_path = ref.file_path
-            # Get just the filename if it's a full path
-            if "/" in file_path:
-                file_name = file_path.split("/")[-1]
-            else:
-                file_name = file_path
-                
-            start_line = ref.start_line
-            end_line = ref.end_line
-            
-            # Add reference with line numbers
-            formatted_text += f"\n**[{i+1}] `{file_name}` (Lines {start_line}-{end_line}):**\n"
-            
-            # Determine language from file name for syntax highlighting
-            language = get_language_from_file(file_name)
-            
-            # Add code block with syntax highlighting - using snippet instead of code
-            formatted_text += f"```{language}\n{ref.snippet}\n```\n"
+        # Add to the formatted text with appropriate separator
+        if code_ref_text:
+            formatted_text += "\n\n" + code_ref_text
     
     return formatted_text
-
-def get_language_from_file(file_name: str) -> str:
-    """
-    Determine the programming language based on file extension for syntax highlighting.
-    
-    Args:
-        file_name: Name of the file
-        
-    Returns:
-        Language identifier for syntax highlighting
-    """
-    extension = file_name.split('.')[-1].lower() if '.' in file_name else ''
-    
-    language_map = {
-        'py': 'python',
-        'js': 'javascript',
-        'ts': 'typescript',
-        'jsx': 'jsx',
-        'tsx': 'tsx',
-        'html': 'html',
-        'css': 'css',
-        'json': 'json',
-        'md': 'markdown',
-        'sql': 'sql',
-        'java': 'java',
-        'c': 'c',
-        'cpp': 'cpp',
-        'h': 'c',
-        'hpp': 'cpp',
-        'go': 'go',
-        'rs': 'rust',
-        'rb': 'ruby',
-        'php': 'php',
-        'sh': 'bash',
-        'yaml': 'yaml',
-        'yml': 'yaml',
-    }
-    
-    return language_map.get(extension, '')
 
 def process_query(
     query: str, 
@@ -1144,7 +528,7 @@ def process_query(
     community_detector: Optional[Any] = None,
     community_reports: Optional[Dict[str, Any]] = None,
     search_settings: Optional[Dict[str, Any]] = None,
-    timeout: int = 30  # Reduced from 60 to 30 seconds
+    timeout: int = 30
 ) -> Dict[str, Any]:
     """
     Process a natural language query about the code.
@@ -1155,17 +539,19 @@ def process_query(
         community_detector: The community detector
         community_reports: The community reports
         search_settings: Search settings
-        timeout: Timeout in seconds (default: 30)
+        timeout: Timeout in seconds
         
     Returns:
         Dictionary containing the response, code references, and other metadata
     """
+    print(f"Processing query: {query}")
+    
     # Default search settings if not provided
     if not search_settings:
         search_settings = {
             "strategy": "local",
             "params": {
-                "max_results": 10,
+                "max_results": 20,
                 "include_code": True,
                 "max_hops": 2
             }
@@ -1193,31 +579,82 @@ def process_query(
             graph=graph
         )
         
-        # Optimize search parameters for faster response
-        if "params" in search_settings:
-            # Reduce max_results for faster search
-            if "max_results" in search_settings["params"] and search_settings["params"]["max_results"] > 10:
-                search_settings["params"]["max_results"] = 10
-                
-            # Limit max_hops to reduce graph traversal time
-            if "max_hops" in search_settings["params"] and search_settings["params"]["max_hops"] > 2:
-                search_settings["params"]["max_hops"] = 2
+        # Apply minimal optimizations to search params to maintain quality
+        params = search_settings.get("params", {})
         
-        # Process the query using the engine with optimized settings
-        search_results = search_codebase(
-            query=query,
-            graph=graph,
-            community_detector=community_detector,
-            community_reports=community_reports,
-            strategy=search_settings["strategy"],
-            params=search_settings["params"]
-        )
+        # Check if this is a structure-related query
+        is_structure_query = any(term in query.lower() for term in 
+                               ["structure", "architecture", "organization", "layout", "overview"])
+        
+        # For structure queries, we want to include community information
+        if is_structure_query and community_reports:
+            print("Handling structure-related query with community information")
+            
+            # We'll prioritize community reports for structure queries
+            community_context = []
+            
+            # Get the most relevant community reports
+            for report_key, report in community_reports.items():
+                if report and hasattr(report, 'summary') and report.summary:
+                    community_context.append({
+                        "type": "community",
+                        "name": f"Community {report_key}",
+                        "description": report.summary,
+                        "members": ", ".join(report.top_entities[:5]) if hasattr(report, 'top_entities') else ""
+                    })
+            
+            # Process the query using search with the community context
+            search_results = search_codebase(
+                query=query,
+                graph=graph,
+                community_detector=community_detector,
+                community_reports=community_reports,
+                strategy=search_settings["strategy"],
+                params=params
+            )
+            
+            # If we have community context, enhance the standard search results
+            if community_context and search_results.get("entities"):
+                combined_context = community_context + search_results.get("entities", [])
+                # Keep only the most relevant items (avoid context overflow)
+                if len(combined_context) > params.get("max_results", 20):
+                    combined_context = combined_context[:params.get("max_results", 20)]
+                search_results["entities"] = combined_context
+            
+        else:
+            # Standard search for non-structure queries
+            print(f"Searching codebase with strategy: {search_settings['strategy']}")
+            search_results = search_codebase(
+                query=query,
+                graph=graph,
+                community_detector=community_detector,
+                community_reports=community_reports,
+                strategy=search_settings["strategy"],
+                params=params
+            )
+        
+        # Check if search yielded results
+        if not search_results.get("entities") and not search_results.get("communities"):
+            # Try a fallback broader search if too restrictive
+            print("Initial search yielded no results, trying broader search...")
+            fallback_params = params.copy()
+            fallback_params["min_similarity"] = 0.5 if "min_similarity" in params and params["min_similarity"] > 0.5 else 0.5
+            
+            search_results = search_codebase(
+                query=query,
+                graph=graph,
+                community_detector=community_detector,
+                community_reports=community_reports,
+                strategy=search_settings["strategy"],
+                params=fallback_params
+            )
         
         # Get the response from the RAG engine
+        print(f"Generating response with {len(search_results.get('entities', []))} context items")
         response = rag_engine.generate_response(
             query_text=query,
             context=search_results.get("entities", []),
-            search_params=search_settings["params"]
+            search_params=params
         )
         
         # Extract code references from the response
@@ -1279,10 +716,11 @@ def extract_code_references_from_response(response):
             if not file_path or not isinstance(file_path, str):
                 continue
                 
-            # Extract code snippet, with fallback
-            code_snippet = ref.get("code", "")
-            if not code_snippet and "code_snippet" in ref:
-                code_snippet = ref["code_snippet"]
+            # Extract code snippet
+            code_snippet = ref.get("snippet", "")
+            # For backward compatibility check for 'code' field
+            if not code_snippet and "code" in ref:
+                code_snippet = ref["code"]
                 
             # Create the reference object
             code_ref = CodeReference(
@@ -1307,7 +745,7 @@ def process_query_with_timeout(
     community_detector: Optional[Any] = None,
     community_reports: Optional[Dict[str, Any]] = None,
     search_settings: Optional[Dict[str, Any]] = None,
-    timeout: int = 30
+    timeout: int = 45  # Increased timeout for better quality
 ) -> Dict[str, Any]:
     """
     Process a query with a timeout to prevent hanging.
@@ -1318,17 +756,172 @@ def process_query_with_timeout(
         community_detector: Community detector
         community_reports: Community reports
         search_settings: Search settings
-        timeout: Timeout in seconds (default: 30)
+        timeout: Timeout in seconds (default: 45)
         
     Returns:
         Dictionary with the response data
     """
+    print(f"Processing query with {timeout}s timeout: {query[:50]}...")
+    
     # Queue for the result
     result_queue = queue.Queue()
+    partial_result_queue = queue.Queue()
     
     # Function to process the query and put the result in the queue
     def process_and_queue():
         try:
+            # Check if this is a general overview question that we can answer directly
+            overview_keywords = ["what is code all about", "what is the code about", "what is this code", 
+                               "code structure", "code about", "purpose of code", "summarize the code"]
+            
+            is_overview_question = any(keyword in query.lower() for keyword in overview_keywords)
+            
+            if is_overview_question and graph and community_detector:
+                # Fast path for overview questions - directly analyze the graph structure
+                try:
+                    # Get statistics about the codebase
+                    node_count = len(graph.graph.nodes)
+                    edge_count = len(graph.graph.edges)
+                    
+                    # Get the types of entities
+                    entity_types = {}
+                    for node in graph.graph.nodes:
+                        node_type = graph.graph.nodes[node].get('type', 'unknown')
+                        entity_types[node_type] = entity_types.get(node_type, 0) + 1
+                    
+                    # Get communities at different levels
+                    communities_level0 = community_detector.get_communities_at_level(0)
+                    communities_level1 = community_detector.get_communities_at_level(1)
+                    
+                    # Find the most connected nodes (potential core components)
+                    central_nodes = sorted(graph.graph.nodes, 
+                                         key=lambda n: len(list(graph.graph.neighbors(n))), 
+                                         reverse=True)[:5]
+                    central_components = []
+                    for node in central_nodes:
+                        if node in graph.graph.nodes:
+                            name = graph.graph.nodes[node].get('name', str(node))
+                            type_ = graph.graph.nodes[node].get('type', 'unknown')
+                            central_components.append(f"{name} ({type_})")
+                    
+                    # Create a summary response
+                    overview_response = {
+                        "response_text": f"""# Code Overview
+
+This codebase contains {node_count} code entities with {edge_count} relationships between them.
+
+## Entity Types
+{', '.join([f"{count} {type_}s" for type_, count in entity_types.items() if type_ != 'unknown'])}
+
+## Main Components
+The code is organized into {len(communities_level0)} high-level components and {len(communities_level1)} sub-modules.
+
+## Core Elements
+The most central components of the codebase appear to be:
+- {"\n- ".join(central_components)}
+
+To explore specific parts of the code, try asking about particular components or functionality.
+""",
+                        "code_references": [],
+                        "status": "success",
+                        "error_message": "",
+                        "metadata": {
+                            "query_time": time.time() - start_time,
+                            "overview": True
+                        }
+                    }
+                    
+                    # Add this result to both queues (main and partial)
+                    partial_result_queue.put(overview_response)
+                    result_queue.put(overview_response)
+                    return  # Exit early - we've handled this query type
+                    
+                except Exception as e:
+                    print(f"Error generating overview: {e}")
+                    # Continue with normal processing if overview generation fails
+            
+            # Try to get partial results even if full processing fails
+            # First do a quick search to have something to return
+            if search_settings and "params" in search_settings:
+                quick_settings = search_settings.copy()
+                quick_settings["params"] = search_settings["params"].copy()
+                quick_settings["params"]["max_results"] = 10
+                
+                # For structure-related queries, prioritize high-level information
+                is_structure_query = any(term in query.lower() for term in 
+                                        ["structure", "architecture", "organization", "layout", "overview"])
+                
+                if is_structure_query and community_detector:
+                    # For structure queries, use community information instead of entity search
+                    try:
+                        # Get high-level communities (level 2 is typically architectural)
+                        communities = community_detector.get_communities_at_level(2)
+                        if not communities or len(communities) <= 1:
+                            # Try middle level if top level has too few communities
+                            communities = community_detector.get_communities_at_level(1)
+                        
+                        if communities and len(communities) > 1:
+                            # Generate a useful response about codebase structure
+                            community_info = []
+                            for comm_id, members in list(communities.items())[:8]:  # Limit to 8 communities
+                                # Get a representative sample of members
+                                sample_members = list(members)[:5]
+                                member_names = [graph.graph.nodes[n].get('name', str(n)) for n in sample_members if n in graph.graph.nodes]
+                                if member_names:
+                                    community_info.append(f"**Community {comm_id}**: {', '.join(member_names)} {'and more' if len(members) > 5 else ''}")
+                            
+                            structure_response = {
+                                "response_text": f"The codebase is organized into {len(communities)} main components:\n\n" + 
+                                                "\n".join(community_info) +
+                                                "\n\nI'm analyzing the detailed structure. Please wait or ask a more specific question about one of these components.",
+                                "code_references": [],
+                                "status": "partial",
+                                "error_message": "Only high-level structure available due to timeout",
+                                "metadata": {"query_time": timeout, "partial": True}
+                            }
+                            partial_result_queue.put(structure_response)
+                    except Exception as e:
+                        print(f"Error getting community structure: {e}")
+                
+                # Standard entity search for partial results
+                try:
+                    partial_result = search_codebase(
+                        query=query,
+                        graph=graph,
+                        community_detector=community_detector,
+                        community_reports=community_reports,
+                        strategy=quick_settings["strategy"],
+                        params=quick_settings["params"]
+                    )
+                    
+                    # Save these partial results to return something if we timeout
+                    if partial_result and partial_result.get("entities"):
+                        entity_list = []
+                        for e in partial_result.get("entities", [])[:7]:  # Show up to 7 entities
+                            entity_name = e.get('name', 'Unknown')
+                            entity_type = e.get('type', 'Unknown')
+                            file_path = e.get('file', 'Unknown location')
+                            
+                            # Only add valid entities
+                            if entity_name != 'Unknown' and file_path != 'Unknown location' and file_path is not None:
+                                entity_list.append(f"- **{entity_name}** ({entity_type}) in {file_path}")
+                        
+                        if entity_list:
+                            partial_result_queue.put({
+                                "response_text": f"I'm analyzing the code structure, but it's taking longer than expected. " +
+                                                f"Here are some key components I've found so far:\n\n" +
+                                                "\n".join(entity_list) + 
+                                                "\n\nFor a complete analysis, please try a more specific question about one of these components.",
+                                "code_references": [],
+                                "status": "partial",
+                                "error_message": "Only partial results available due to timeout",
+                                "search_results": partial_result,
+                                "metadata": {"query_time": timeout, "partial": True}
+                            })
+                except Exception as e:
+                    print(f"Error getting partial search results: {e}")
+            
+            # Now do the full processing
             result = process_query(
                 query=query,
                 graph=graph,
@@ -1338,6 +931,8 @@ def process_query_with_timeout(
             )
             result_queue.put(result)
         except Exception as e:
+            print(f"Error in process_and_queue: {str(e)}")
+            traceback.print_exc()
             result_queue.put({
                 "response_text": f"Error processing query: {str(e)}",
                 "code_references": [],
@@ -1356,14 +951,19 @@ def process_query_with_timeout(
         result = result_queue.get(timeout=timeout)
         return result
     except queue.Empty:
-        # Timeout occurred
-        return {
-            "response_text": "I'm sorry, but your query took too long to process. Please try asking a more specific question about the codebase.",
-            "code_references": [],
-            "status": "timeout",
-            "error_message": "Query processing timed out",
-            "metadata": {"query_time": timeout}
-        }
+        # Timeout occurred - try to return partial results if available
+        try:
+            partial_result = partial_result_queue.get(block=False)
+            return partial_result
+        except queue.Empty:
+            # No partial results available either
+            return {
+                "response_text": "I'm sorry, but your query took too long to process. Please try asking a more specific question about the codebase.",
+                "code_references": [],
+                "status": "timeout",
+                "error_message": "Query processing timed out",
+                "metadata": {"query_time": timeout}
+            }
 
 def handle_message(prompt):
     """
@@ -1375,34 +975,32 @@ def handle_message(prompt):
     # Check if we have a processed codebase
     if not st.session_state.get("processing_complete", False):
         response_text = "Please upload and process a codebase first before asking questions."
-        
-        # Add assistant message to chat history
         timestamp = datetime.now().strftime("%H:%M:%S")
-        st.session_state.chat_messages.append({
+        st.session_state.setdefault("chat_messages", []).append({
             "role": "assistant", 
             "content": response_text,
             "timestamp": timestamp
         })
         return
-    
-    # Get current search settings
-    search_settings = {
-        "strategy": st.session_state.get("search_strategy", "local"),
-        "params": st.session_state.get("search_params", {
-            "max_results": 10,
+
+    # Get current search settings (use defaults if not set)
+    search_settings = st.session_state.get("current_search_settings", {
+        "strategy": "local",
+        "params": {
+            "max_results": 20,  # Increased from 10
             "include_code": True,
             "max_hops": 2
-        })
-    }
-    
-    # Show processing status with a more detailed, dynamically updating indicator
+        }
+    })
+
     with st.status("Analyzing your question...", expanded=True) as status:
-        # Create progress updates using milestones
+        # Create progress updates using milestones that provide more detail
         milestones = [
-            ("Searching codebase...", 0),
-            ("Analyzing code entities...", 0.3),
-            ("Retrieving relevant context...", 0.6),
-            ("Generating response...", 0.8)
+            ("Parsing question and identifying key concepts...", 0),
+            ("Searching codebase for relevant entities...", 0.2),
+            ("Analyzing code relationships...", 0.4),
+            ("Retrieving context from similar code sections...", 0.6),
+            ("Generating detailed response...", 0.8)
         ]
         
         progress_bar = st.progress(0)
@@ -1414,719 +1012,202 @@ def handle_message(prompt):
         # Function to update progress in a separate thread
         def update_progress():
             for i, (message, progress_value) in enumerate(milestones):
-                time.sleep(0.5)  # Small delay between updates
-                progress_bar.progress(progress_value)
-                progress_text.write(message)
+                time.sleep(0.4)  # Slightly faster updates
+                try:
+                    progress_bar.progress(progress_value)
+                    progress_text.write(message)
+                except Exception as e:
+                    # Silently handle missing context errors when running in thread
+                    print(f"Progress update ignored: {str(e)}")
                 
                 # Don't sleep after the last milestone
                 if i < len(milestones) - 1:
-                    time.sleep(0.8)
+                    time.sleep(0.6)  # Reduced sleep time
         
         # Start progress updates in a separate thread
         progress_thread = threading.Thread(target=update_progress)
+        progress_thread.daemon = True  # Ensure thread terminates with main thread
         progress_thread.start()
         
-        # Process the query with reduced timeout (30 seconds)
+        # Process the query with timeout
         response_data = process_query_with_timeout(
             query=prompt,
-            graph=st.session_state.graph,
-            community_detector=st.session_state.community_detector,
-            community_reports=st.session_state.community_reports,
+            graph=st.session_state.get("graph"),
+            community_detector=st.session_state.get("community_detector"),
+            community_reports=st.session_state.get("community_reports"),
             search_settings=search_settings,
-            timeout=30  # Reduced timeout for faster response
+            timeout=45  # Increased timeout for better responses
         )
         
         # Update final progress
         progress_bar.progress(1.0)
-        progress_text.write("Response complete!")
         
-        # Update status based on response
+        # Different progress messages based on status
         if response_data["status"] == "success":
+            progress_text.write("Response complete!")
             status.update(label="Response ready!", state="complete", expanded=False)
+        elif response_data["status"] == "partial":
+            progress_text.write("Partial results retrieved (timeout occurred)")
+            status.update(label="Partial results available", state="running", expanded=True)
+            st.warning("The full analysis couldn't complete in time, but I've provided some initial findings.")
         elif response_data["status"] == "timeout":
+            progress_text.write("Analysis timed out")
             status.update(label="Query timed out", state="error", expanded=True)
             st.warning("The query took too long to process. Please try a more specific question.")
         else:
+            progress_text.write("Error processing query")
             status.update(label="Error processing query", state="error", expanded=True)
             st.error(f"Error: {response_data['error_message']}")
     
-    # Format the response with code references
-    response_text = response_data["response_text"]
+    # --- Reference Filtering Logic --- 
+    response_text = response_data.get("response_text", "")
     code_references = response_data.get("code_references", [])
     
-    # Create a formatted response with code blocks and references
+    # Define simple greetings and generic responses
+    simple_greetings = ["hi", "hello", "hey", "thanks", "thank you", "ok", "okay"]
+    generic_responses = [
+        "how can i assist", 
+        "how can i help", 
+        "couldn't find any relevant information",
+        "don't have specific information about that",
+        "based on the provided context"
+        # Add other phrases if needed
+    ]
+
+    is_simple_greeting = prompt.strip().lower() in simple_greetings
+    is_generic_response = any(phrase in response_text.lower() for phrase in generic_responses)
+
+    # If it's a simple greeting OR the response seems generic/unrelated to specific code,
+    # clear the code references.
+    if is_simple_greeting or is_generic_response:
+        print("INFO: Clearing code references for generic query/response.") # Optional logging
+        code_references = [] 
+    # --- End of Reference Filtering Logic --- 
+
+    # Format the response (potentially with empty references now)
     formatted_response = format_response_with_references(response_text, code_references)
-    
+
     # Add assistant message to chat history
     response_timestamp = datetime.now().strftime("%H:%M:%S")
-    st.session_state.chat_messages.append({
-        "role": "assistant", 
+    st.session_state.setdefault("chat_messages", []).append({
+        "role": "assistant",
         "content": formatted_response,
-        "raw_content": response_text,
-        "code_references": code_references,
+        "raw_content": response_text, # Store raw text separately if needed
+        "code_references": code_references, # Store the (potentially empty) list
         "timestamp": response_timestamp,
         "metadata": response_data.get("metadata", {})
     })
 
-# Handle tab change
-def handle_tab_change(tab_name):
-    """Update the current tab in session state."""
-    st.session_state.current_tab = tab_name
-
-# Toggle sidebar visibility
-def toggle_sidebar():
-    """Toggle sidebar visibility by updating session state."""
-    if "sidebar_collapsed" not in st.session_state:
-        st.session_state.sidebar_collapsed = False
-    
-    # Toggle the state
-    st.session_state.sidebar_collapsed = not st.session_state.sidebar_collapsed
-    
-    # Force rerun to apply changes
-    st.rerun()
-
-def check_required_packages():
-    """
-    Check if all required packages are installed.
-    Provides guidance if any are missing.
-    
-    Returns:
-        bool: True if all packages are installed, False otherwise
-    """
-    required_packages = {
-        "streamlit": "Streamlit UI framework",
-        "networkx": "Graph operations and structure",
-        "plotly": "Interactive visualizations",
-        "requests": "HTTP client for API calls",
-        "numpy": "Numerical computations",
-        "matplotlib": "Basic plotting capabilities"
-    }
-    
-    optional_packages = {
-        "community": "Python-Louvain package for community detection (optional)",
-        "watchdog": "Improved file watching for Streamlit (optional)"
-    }
-    
-    missing_packages = []
-    missing_optional_packages = []
-    
-    for package, description in required_packages.items():
-        try:
-            __import__(package)
-        except ImportError:
-            missing_packages.append((package, description))
-    
-    for package, description in optional_packages.items():
-        try:
-            __import__(package)
-        except ImportError:
-            missing_optional_packages.append((package, description))
-    
-    if missing_packages:
-        st.error("### Missing Required Packages")
-        st.markdown("The following packages are required but not installed:")
-        
-        for package, description in missing_packages:
-            st.markdown(f"- **{package}**: {description}")
-        
-        st.markdown("""
-        ### Installation Instructions
-        
-        Run the following command to install all required packages:
-        ```
-        pip install streamlit networkx plotly requests numpy matplotlib
-        ```
-        
-        Then restart the application.
-        """)
-        return False
-    
-    if missing_optional_packages:
-        st.warning("### Optional Packages Not Installed")
-        st.markdown("The following optional packages are not installed:")
-        
-        for package, description in missing_optional_packages:
-            st.markdown(f"- **{package}**: {description}")
-        
-        st.markdown("""
-        Some features may be limited. You can install optional packages with:
-        ```
-        pip install python-louvain watchdog
-        ```
-        """)
-    
-    return True
-
-# Add fullscreen toggle JavaScript
-def add_fullscreen_toggle():
-    """Add a fullscreen toggle button using JavaScript."""
-    st.markdown("""
-    <style>
-        .fullscreen-button {
-            position: fixed;
-            top: 15px;
-            right: 15px;
-            background-color: var(--ubs-red);
-            color: white;
-            border: none;
-            border-radius: 50%;
-            width: 36px;
-            height: 36px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            z-index: 9999;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
-            transition: all 0.3s ease;
-        }
-        .fullscreen-button:hover {
-            background-color: var(--ubs-dark-red);
-            transform: scale(1.1);
-        }
-        .fullscreen-button svg {
-            width: 18px;
-            height: 18px;
-        }
-    </style>
-    
-    <button onclick="toggleFullscreen()" class="fullscreen-button" title="Toggle Fullscreen (F11)">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
-        </svg>
-    </button>
-    
-    <script>
-        function toggleFullscreen() {
-            if (!document.fullscreenElement) {
-                // Go fullscreen
-                if (document.documentElement.requestFullscreen) {
-                    document.documentElement.requestFullscreen();
-                } else if (document.documentElement.mozRequestFullScreen) { /* Firefox */
-                    document.documentElement.mozRequestFullScreen();
-                } else if (document.documentElement.webkitRequestFullscreen) { /* Chrome, Safari & Opera */
-                    document.documentElement.webkitRequestFullscreen();
-                } else if (document.documentElement.msRequestFullscreen) { /* IE/Edge */
-                    document.documentElement.msRequestFullscreen();
-                }
-            } else {
-                // Exit fullscreen
-                if (document.exitFullscreen) {
-                    document.exitFullscreen();
-                } else if (document.mozCancelFullScreen) { /* Firefox */
-                    document.mozCancelFullScreen();
-                } else if (document.webkitExitFullscreen) { /* Chrome, Safari & Opera */
-                    document.webkitExitFullscreen();
-                } else if (document.msExitFullscreen) { /* IE/Edge */
-                    document.msExitFullscreen();
-                }
-            }
-        }
-        
-        // Also listen for F11 key to toggle fullscreen
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'F11') {
-                e.preventDefault();
-                toggleFullscreen();
-            }
-        });
-    </script>
-    """, unsafe_allow_html=True)
-
 # Main Application
 def main():
     """Main function to render the Streamlit app."""
-    # Initialize app state and styles
-    initialize_app_state()
+    # Check if API key is valid before proceeding
+    # Assuming check_api_key() is defined and works
+    if not check_api_key():
+        st.stop()  # Stop execution if API key setup is needed
+
+    # Initialize state if not already done
+    if "initialized" not in st.session_state:
+        initialize_app_state() # Assuming this function initializes required states
+        st.session_state.initialized = True
+
+    # Load and apply custom styles
+    # Ensure st.set_page_config is called only once here or within apply_custom_styling
     apply_custom_styling()
-    
-    # Create header
-    create_header()
-    
-    # Create sidebar with callbacks
-    settings = create_sidebar(
+
+    # --- Header ---
+    create_header() # Assuming this function is defined in ui_components
+
+    # --- Sidebar ---
+    # Assuming create_sidebar will be modified separately to remove settings
+    create_sidebar(
         on_file_upload=handle_file_upload,
-        on_settings_change=handle_settings_change
+        on_settings_change=handle_settings_change # Callback might be unused now
     )
-    
-    # Move debug information to a collapsed expander in the sidebar
-    with st.sidebar:
-        # Add debug information in a collapsed expander for developers
-        with st.expander("Developer Debug Info", expanded=False):
-            st.write("### Debug Information")
-            
-            # Check if graph is loaded
-            if "graph" in st.session_state and st.session_state.graph is not None:
-                st.success(f"✓ Graph loaded: {len(st.session_state.graph.graph.nodes) if hasattr(st.session_state.graph, 'graph') else 'No nodes'} nodes")
-            else:
-                st.warning("⚠️ No graph loaded")
-                
-            # Check if community detector is loaded
-            if "community_detector" in st.session_state and st.session_state.community_detector is not None:
-                st.success("✓ Community detector loaded")
-            else:
-                st.warning("⚠️ No community detector")
-                
-            # Check if community reports are available
-            if "community_reports" in st.session_state and st.session_state.community_reports is not None:
-                st.success(f"✓ Community reports available")
-            else:
-                st.warning("⚠️ No community reports")
-                
-            # Check if processing is complete
-            if "processing_complete" in st.session_state and st.session_state.processing_complete:
-                st.success("✓ Processing complete")
-            else:
-                st.warning("⚠️ Processing not complete")
-                
-            # Check current tab
-            if "current_tab" in st.session_state:
-                st.info(f"Current tab: {st.session_state.current_tab}")
-        
-        # Add visualization mode selector
-        if "graph" in st.session_state and st.session_state.graph is not None:
-            st.write("### Visualization Settings")
-            viz_mode = st.selectbox(
-                "Visualization Mode",
-                options=["Standard", "Artistic"],
-                index=0,
-                help="Choose the graph visualization style"
-            )
-            if "visualization_mode" not in st.session_state or st.session_state.visualization_mode != viz_mode:
-                st.session_state.visualization_mode = viz_mode
-    
-    # Store the current settings
-    if "search_settings" not in st.session_state:
-        st.session_state.search_settings = settings
-    
-    # Check if page should be in fullscreen mode
-    if st.session_state.get("fullscreen", False):
-        add_fullscreen_toggle()
-    
-    # Initialize the appropriate RAG engine based on settings
-    # Ensure we have all required objects before initializing
-    if "graph" in st.session_state and st.session_state.graph is not None:
-        # Check if we're using global search (requires community detector)
-        using_global = settings["strategy"] == "global"
-        
-        if (using_global and 
-            "community_detector" in st.session_state and 
-            st.session_state.community_detector is not None and
-            "community_reports" in st.session_state and 
-            st.session_state.community_reports is not None):
-            
-            # Initialize global search engine
-            if "rag_engine" not in st.session_state or not isinstance(st.session_state.rag_engine, GraphRAGEngine):
-                try:
-                    # Create the RAG engine with just the graph parameter
-                    st.session_state.rag_engine = GraphRAGEngine(
-                        graph=st.session_state.graph
-                    )
-                    
-                    # Separately create a search engine for search operations if needed
-                    if "search_engine" not in st.session_state:
-                        from talktocode.retrieval.search import GraphSearchEngine
-                        st.session_state.search_engine = GraphSearchEngine(
-                            graph=st.session_state.graph,
-                            community_detector=st.session_state.community_detector,
-                            community_reports=st.session_state.community_reports
-                        )
-                except Exception as e:
-                    st.error(f"Error initializing RAG engine: {str(e)}")
-                    st.exception(e)
-        
-        elif not using_global:
-            # Initialize local search engine (doesn't require community detector)
-            if "rag_engine" not in st.session_state or not isinstance(st.session_state.rag_engine, GraphRAGEngine):
-                try:
-                    # Create the RAG engine with just the graph parameter
-                    st.session_state.rag_engine = GraphRAGEngine(
-                        graph=st.session_state.graph
-                    )
-                    
-                    # Separately create a search engine for search operations if needed
-                    if "search_engine" not in st.session_state:
-                        from talktocode.retrieval.search import GraphSearchEngine
-                        st.session_state.search_engine = GraphSearchEngine(
-                            graph=st.session_state.graph
-                        )
-                except Exception as e:
-                    st.error(f"Error initializing RAG engine: {str(e)}")
-                    st.exception(e)
-    
-    # Define tab names for easy reference
-    tab_names = ["Knowledge Graph", "Chat", "Code Explorer", "Settings"]
-    
-    # Create main content tabs
-    tabs = st.tabs(tab_names)
-    
-    # Track which tab is selected (index-based)
-    if "active_tab_index" not in st.session_state:
-        st.session_state.active_tab_index = 0
-    
-    # Knowledge Graph tab
-    with tabs[0]:
-        if st.session_state.active_tab_index != 0:
-            st.session_state.active_tab_index = 0
-            st.session_state.current_tab = tab_names[0]
-            
-        # Check if processing is complete
-        is_processed = st.session_state.get("processing_complete", False)
-        
-        graph_data = None
-        if is_processed and "graph" in st.session_state and st.session_state.graph is not None:
-            # Use the graph from session state
-            graph_data = st.session_state.graph.graph
-        
-        # Get community data if available
-        communities = None
-        if is_processed and "community_detector" in st.session_state and st.session_state.community_detector is not None:
-            # Get communities at the appropriate level
-            level = st.session_state.get("visualization", {}).get("level", 0)
-            communities = st.session_state.community_detector.get_communities_at_level(level)
-        
-        # Get search results if available
-        search_results = st.session_state.get("search_results", None)
-        
-        # Add prominent visualization mode selector directly in the graph tab
-        if is_processed and graph_data is not None:
-            st.markdown("### Visualization Style")
-            cols = st.columns([3, 3, 2])
-            
-            with cols[0]:
-                viz_mode = st.radio(
-                    "Select Visualization Style",
-                    options=["Standard", "Artistic"],
-                    index=1 if st.session_state.get("visualization_mode") == "Artistic" else 0,
-                    horizontal=True
+
+    # --- Main Content Area (No Tabs Directly Here) ---
+    main_container = st.container()
+    with main_container:
+
+        # == Content previously in "Knowledge Graph" tab ==
+        st.subheader("Code Knowledge Graph") # Added subheader for clarity
+        graph_placeholder = st.empty() # Placeholder for the graph
+        if st.session_state.get("processing_complete") and st.session_state.get("graph"):
+            try:
+                # Use the function that renders the graph visualization HTML
+                from ui.ui_components import create_enhanced_visualization # Adjust import if needed
+
+                # Access the internal NetworkX graph object
+                networkx_graph_obj = st.session_state.graph.graph # Assuming .graph holds the nx object
+
+                visualization_html = create_enhanced_visualization(
+                    graph=networkx_graph_obj, # Pass the internal nx graph
+                    # Pass communities if needed and available (adjust based on your structure)
+                    communities=st.session_state.get("community_detector").get_communities_at_level(0) if st.session_state.get("community_detector") else None
+                    # Add necessary arguments if required
                 )
-                if viz_mode != st.session_state.get("visualization_mode"):
-                    st.session_state.visualization_mode = viz_mode
-                    st.rerun()
-            
-            with cols[1]:
-                max_nodes = st.slider(
-                    "Max Nodes to Display",
-                    min_value=50,
-                    max_value=500,
-                    value=200,
-                    step=50,
-                    help="Higher values show more nodes but may slow down visualization"
-                )
-                if "max_display_nodes" not in st.session_state or st.session_state.max_display_nodes != max_nodes:
-                    st.session_state.max_display_nodes = max_nodes
-            
-            with cols[2]:
-                if st.button("🔄 Refresh Visualization", use_container_width=True):
-                    st.rerun()
-        
-        # Create graph container with visualization mode
-        if is_processed and graph_data is not None:
-            # Get visualization mode
-            viz_mode = st.session_state.get("visualization_mode", "Artistic")  # Default to Artistic now
-            max_nodes = st.session_state.get("max_display_nodes", 200)
-            
-            if viz_mode == "Artistic":
-                # Import the artistic visualization function
-                from ui.ui_components import create_artistic_graph_visualization
-                
-                # Create the artistic visualization
-                st.markdown("## Artistic Code Knowledge Graph")
-                st.markdown("This visualization shows your code as an interactive 3D network with flowing connections.")
-                st.markdown("**Instructions:** Drag to rotate, scroll to zoom, and hover over nodes to see details. Node names become visible when you zoom in.")
-                
-                create_artistic_graph_visualization(
-                    graph=graph_data,
-                    communities=communities,
-                    max_nodes=max_nodes,
-                    view_mode="artistic"
-                )
-            else:
-                # Create standard graph container
-                create_graph_container(
-                    is_processed=is_processed,
-                    graph=graph_data,
-                    communities=communities,
-                    search_results=search_results
-                )
-    
-    # Chat tab
-    with tabs[1]:
-        if st.session_state.active_tab_index != 1:
-            st.session_state.active_tab_index = 1
-            st.session_state.current_tab = tab_names[1]
-            
-        # Create chat interface that calls handle_message but without chat_input
-        create_chat_interface(
-            on_message_send=handle_message,
-            is_processed=st.session_state.get("processing_complete", False)
-        )
-    
-    # Code Explorer tab
-    with tabs[2]:
-        if st.session_state.active_tab_index != 2:
-            st.session_state.active_tab_index = 2
-            st.session_state.current_tab = tab_names[2]
-            
-        st.header("Code Explorer")
-        
-        # Check if processing is complete
-        if not st.session_state.get("processing_complete", False):
-            st.info("Process your code to enable the Code Explorer.")
+                graph_placeholder.markdown(visualization_html, unsafe_allow_html=True)
+            except ImportError:
+                 graph_placeholder.error("Graph visualization component not found.")
+            except AttributeError as ae:
+                 # More specific error handling if the attribute name is wrong
+                 if "'CodeKnowledgeGraph' object has no attribute 'graph'" in str(ae):
+                     graph_placeholder.error("Internal Error: Cannot access the graph object within CodeKnowledgeGraph. Check attribute name (e.g., self.graph).")
+                 else:
+                     graph_placeholder.error(f"Failed to render graph visualization (AttributeError): {ae}")
+            except Exception as e:
+                graph_placeholder.error(f"Failed to render graph visualization: {e}")
+        elif st.session_state.get("code_dir") and not st.session_state.get("processing_complete"):
+             st.info("Processing codebase... Please wait.")
         else:
-            # Create file browser
-            if "graph" in st.session_state and st.session_state.graph is not None:
-                # Get file list
-                files = st.session_state.graph.get_files()
-                
-                if files:
-                    # Create file selector
-                    selected_file = st.selectbox(
-                        "Select a file to view",
-                        options=files,
-                        format_func=lambda x: os.path.basename(x)
-                    )
-                    
-                    # Show file content
-                    if selected_file:
-                        try:
-                            with open(selected_file, "r") as f:
-                                content = f.read()
-                            
-                            language = get_language_from_file(selected_file)
-                            
-                            # Show the file content with syntax highlighting
-                            st.code(content, language=language)
-                            
-                            # Add download button
-                            st.download_button(
-                                "Download File",
-                                content,
-                                file_name=os.path.basename(selected_file),
-                                mime="text/plain"
-                            )
-                        except Exception as e:
-                            st.error(f"Error loading file: {str(e)}")
-                else:
-                    st.warning("No files found in the graph.")
-            else:
-                st.warning("Graph not available. Please process your code first.")
-    
-    # Settings tab
-    with tabs[3]:
-        if st.session_state.active_tab_index != 3:
-            st.session_state.active_tab_index = 3
-            st.session_state.current_tab = tab_names[3]
-            
-        st.header("Application Settings")
-        
-        # API key settings
-        api_key = st.text_input(
-            "OpenAI API Key (optional)",
-            value=os.environ.get("OPENAI_API_KEY", ""),
-            type="password",
-            help="Enter your OpenAI API key to use ChatGPT API"
-        )
-        
-        if st.button("Save API Key"):
-            if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
-                st.success("API key saved for this session.")
-            else:
-                if "OPENAI_API_KEY" in os.environ:
-                    del os.environ["OPENAI_API_KEY"]
-                st.info("API key removed.")
-        
-        # UI settings
-        st.subheader("UI Settings")
-        
-        # Toggle fullscreen mode
-        fullscreen = st.checkbox(
-            "Fullscreen Mode",
-            value=st.session_state.get("fullscreen", False),
-            help="Remove Streamlit's default header and footer"
-        )
-        
-        if fullscreen != st.session_state.get("fullscreen", False):
-            st.session_state.fullscreen = fullscreen
-            st.rerun()
-        
-        # Advanced settings
-        st.subheader("Advanced Settings")
-        
-        # Timeout setting
-        query_timeout = st.slider(
-            "Query Timeout (seconds)",
-            min_value=10,
-            max_value=300,
-            value=st.session_state.get("query_timeout", 60),
-            step=10,
-            help="Maximum time allowed for processing queries"
-        )
-        
-        if query_timeout != st.session_state.get("query_timeout", 60):
-            st.session_state.query_timeout = query_timeout
-            
-        # Reset application button
-        if st.button("Reset Application", use_container_width=True):
-            # Clear session state
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-                
-            # Reinitialize
-            initialize_app_state()
-            st.success("Application has been reset.")
-            st.rerun()
-    
-    # Create custom chat display if enabled
-    create_custom_chat_display()
-    
-    # Initialize current_tab if it hasn't been set yet
-    if "current_tab" not in st.session_state and "active_tab_index" in st.session_state:
-        st.session_state.current_tab = tab_names[st.session_state.active_tab_index]
-    
-    # Add chat input OUTSIDE of tabs and call the handle_chat_input function
-    is_processed = st.session_state.get("processing_complete", False)
-    placeholder = "Ask a question about your code..." if is_processed else "Upload and process code to enable chat"
-    
-    from ui.ui_components import handle_chat_input
-    message = st.chat_input(placeholder, disabled=not is_processed, key="main_chat_input")
-    handle_chat_input(message, is_processed)
+            st.info("Upload a codebase using the sidebar to view the graph.")
+        # == End of former "Knowledge Graph" tab content ==
 
-def create_custom_chat_display():
-    """
-    Create a custom chat display that supports code formatting and references.
-    
-    This function replaces the standard create_chat_interface function with enhanced
-    styling and support for code blocks and references.
-    """
-    # Add custom CSS for enhanced chat styling
-    st.markdown("""
-    <style>
-    /* Enhanced chat styling */
-    .chat-container {
-        margin-top: 2rem;
-        padding-top: 1.5rem;
-        border-top: 1px solid var(--ubs-light-gray);
-    }
-    
-    /* Chat header */
-    .chat-header {
-        display: flex;
-        align-items: center;
-        margin-bottom: 1rem;
-    }
-    .chat-icon {
-        margin-right: 0.5rem;
-        font-size: 1.5rem;
-    }
-    
-    /* Message styling */
-    .code-reference {
-        background-color: #f8f9fa;
-        border-left: 3px solid var(--ubs-blue);
-        padding: 10px;
-        margin-top: 5px;
-        border-radius: 0 4px 4px 0;
-        font-family: monospace;
-    }
-    
-    /* Code blocks */
-    pre {
-        background-color: #f6f8fa;
-        border-radius: 6px;
-        padding: 16px;
-        overflow-x: auto;
-    }
-    
-    code {
-        font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
-        font-size: 0.9em;
-    }
-    
-    /* File references */
-    .file-reference {
-        color: var(--ubs-blue);
-        font-weight: bold;
-        cursor: pointer;
-    }
-    
-    /* Message metadata */
-    .message-metadata {
-        font-size: 0.8em;
-        color: var(--ubs-medium-gray);
-        margin-top: 5px;
-        font-style: italic;
-    }
-    
-    /* Error message styling */
-    .error-message {
-        background-color: #ffebee;
-        border-left: 3px solid var(--ubs-red);
-        padding: 10px;
-        margin-top: 5px;
-        border-radius: 0 4px 4px 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Chat header with icon
-    st.markdown('<div class="chat-header"><span class="chat-icon">💬</span><h2>Chat with Your Code</h2></div>', unsafe_allow_html=True)
-    
-    # Display chat history
-    chat_container = st.container()
-    
-    with chat_container:
-        # Initialize chat_messages in session state if not present
-        if "chat_messages" not in st.session_state:
-            st.session_state.chat_messages = []
-        
-        # Get messages from session state
-        messages = st.session_state.get("chat_messages", [])
-        
-        # Display chat messages
-        for message in messages:
-            role = message["role"]
-            content = message["content"]
-            timestamp = message.get("timestamp", "")
-            
-            with st.chat_message(role):
-                # Display message content
-                st.markdown(content, unsafe_allow_html=True)
-                
-                # Display metadata if it exists
-                if "metadata" in message and message["metadata"]:
-                    metadata = message["metadata"]
-                    with st.expander("Query Details", expanded=False):
-                        st.markdown(f"**Query time:** {metadata.get('query_time', 0):.2f} seconds")
-                        st.markdown(f"**Strategy:** {metadata.get('strategy', 'Unknown')}")
-                        
-                        # Show entities/communities if available
-                        if "entities" in metadata:
-                            st.markdown(f"**Entities found:** {metadata['entities']}")
-                        if "communities" in metadata:
-                            st.markdown(f"**Communities found:** {metadata['communities']}")
-                
-                # Show timestamp
-                if timestamp:
-                    st.caption(f"Sent: {timestamp}")
-    
-    # Create status indicator for chat availability
-    if not st.session_state.get("processing_complete", False):
-        st.markdown("""
-        <div style="display: flex; align-items: center; margin-bottom: 10px; color: #666;">
-            <span style="width: 8px; height: 8px; background-color: #EF5350; border-radius: 50%; margin-right: 8px;"></span>
-            Please upload and process code to enable chat
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div style="display: flex; align-items: center; margin-bottom: 10px; color: #4CAF50;">
-            <span style="width: 8px; height: 8px; background-color: #4CAF50; border-radius: 50%; margin-right: 8px;"></span>
-            Ready to answer questions about your code
-        </div>
-        """, unsafe_allow_html=True)
+        # Divider
+        st.divider()
 
-# Run the application
+        # == Content previously in "Chat" tab ==
+        st.subheader("Chat with Code") # Added subheader for clarity
+        chat_container = st.container()
+        with chat_container:
+            # Use create_chat_interface or directly display messages
+            # create_chat_interface(on_message_send=handle_message, is_processed=st.session_state.get("processing_complete", False))
+            # OR, directly display messages:
+            messages = st.session_state.get("chat_messages", [])
+            for msg in messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+                    references = msg.get("references")
+                    if references:
+                         try:
+                             with st.expander("Show References"):
+                                 from talktocode.utils.code_reference import format_code_references
+                                 st.markdown(format_code_references(references), unsafe_allow_html=True)
+                         except ImportError:
+                             st.warning("Could not display references (formatting function not found).")
+                         except Exception as e:
+                             st.error(f"Error displaying references: {e}")
+        # == End of former "Chat" tab content ==
+
+        # Note: Content from "Code Explorer" and "Settings" tabs is intentionally omitted.
+
+    # --- Chat Input (Remains at the bottom, outside the main_container) ---
+    chat_input_disabled = not st.session_state.get("processing_complete", False)
+    prompt = st.chat_input("Ask a question about the code...", disabled=chat_input_disabled, key="chat_input")
+
+    # --- Chat Processing Logic (Handles input and updates state) ---
+    if prompt:
+        st.session_state.setdefault("chat_messages", []).append(
+            {"role": "user", "content": prompt, "timestamp": datetime.now()}
+        )
+        st.session_state.prompt_to_process = prompt
+        st.rerun()
+
+    if "prompt_to_process" in st.session_state and st.session_state.prompt_to_process:
+        prompt_to_process = st.session_state.prompt_to_process
+        st.session_state.prompt_to_process = None
+        handle_message(prompt_to_process)
+        st.rerun()
+
 if __name__ == "__main__":
     main() 

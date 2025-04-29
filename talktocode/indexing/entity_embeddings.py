@@ -31,13 +31,29 @@ from talktocode.indexing.entity_extractor import (
     CodeEntity, FunctionEntity, ClassEntity, 
     VariableEntity, ImportEntity, extract_code_with_context
 )
+from talktocode.indexing.faiss_manager import FaissIndexManager
 
 # Configure the embedding model
 # Set to text-embedding-ada-002 as required
 set_embedding_model("text-embedding-ada-002")
 
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Initialize OpenAI client - but do it lazily to avoid initialization issues
+# We'll initialize it when needed in the functions instead
+client = None
+
+def get_client():
+    """Get or initialize the OpenAI client."""
+    global client
+    if client is None:
+        try:
+            # Import the shared client function from the main app
+            from app import get_openai_client
+            client = get_openai_client()
+        except ImportError:
+            # Fallback if the import fails
+            # Initialize without extra parameters that might cause issues
+            client = OpenAI(api_key=OPENAI_API_KEY)
+    return client
 
 
 class EntityEmbeddings:
@@ -58,7 +74,7 @@ class EntityEmbeddings:
         self.docstring_embedding: Optional[np.ndarray] = None
         
         # Track when embeddings were last updated
-        self.last_updated = None
+        self.last_updated = time.time()
         
     def to_dict(self) -> Dict[str, Any]:
         """Convert embeddings to dictionary representation for storage."""
@@ -92,89 +108,41 @@ class EntityEmbeddings:
 class EntityEmbeddingGenerator:
     """Generates and manages embeddings for code entities."""
     
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, faiss_manager: Optional[FaissIndexManager] = None):
         """
         Initialize the embedding generator.
         
         Args:
-            cache_dir: Directory to cache embeddings (uses default from config if None)
+            faiss_manager: Optional FaissIndexManager instance
         """
-        # Use the cache directory from config or the provided directory
-        if cache_dir is None:
-            cache_dir = MODEL_CONFIG["embedding"]["cache"]["directory"]
+        # Initialize FAISS manager
+        self.faiss_enabled = MODEL_CONFIG["embedding"].get("faiss", {}).get("enabled", False)
+        self.faiss_manager = faiss_manager
+        if self.faiss_enabled and self.faiss_manager is None:
+            # Attempt to initialize if not provided (e.g., for standalone use)
+            print("Warning: FAISS enabled but no manager provided to EntityEmbeddingGenerator. Initializing default.")
+            faiss_config = MODEL_CONFIG["embedding"]["faiss"]
+            embed_config = MODEL_CONFIG["embedding"]
+            self.faiss_manager = FaissIndexManager(
+                index_directory=faiss_config["index_directory"],
+                dimensions=embed_config["dimensions"],
+                index_factory_string=faiss_config["index_factory_string"],
+                normalize_vectors=faiss_config.get("normalize_vectors", False)
+            )
+        elif not self.faiss_enabled:
+            self.faiss_manager = None # Ensure it's None if not enabled
         
-        self.cache_dir = os.path.join(cache_dir, "entity_embeddings")
-        self.embeddings_cache: Dict[str, EntityEmbeddings] = {}
-        self.loaded_cache = False
+        self._client = None # Lazy init OpenAI client
+        self.embedding_model = MODEL_CONFIG["embedding"]["model"]
+        self.dimensions = MODEL_CONFIG["embedding"]["dimensions"]
         
-        # Create cache directory if it doesn't exist
-        os.makedirs(self.cache_dir, exist_ok=True)
-        
-        # Check if we need to load the cache
-        if MODEL_CONFIG["embedding"]["cache"]["enabled"]:
-            self._load_cache()
-    
-    def _load_cache(self) -> None:
-        """Load embeddings from cache files."""
-        if not os.path.exists(self.cache_dir):
-            return
-        
-        try:
-            # Load the cache index if it exists
-            index_file = os.path.join(self.cache_dir, "index.json")
-            if os.path.exists(index_file):
-                with open(index_file, 'r') as f:
-                    index = json.load(f)
-                
-                # Load each embedding file referenced in the index
-                for entity_id, file_path in index.items():
-                    full_path = os.path.join(self.cache_dir, file_path)
-                    if os.path.exists(full_path):
-                        with open(full_path, 'r') as f:
-                            data = json.load(f)
-                            self.embeddings_cache[entity_id] = EntityEmbeddings.from_dict(data)
-            
-            self.loaded_cache = True
-        except Exception as e:
-            print(f"Error loading embedding cache: {str(e)}")
-    
-    def _save_to_cache(self, entity_embeddings: EntityEmbeddings) -> None:
-        """
-        Save entity embeddings to cache.
-        
-        Args:
-            entity_embeddings: EntityEmbeddings object to save
-        """
-        if not MODEL_CONFIG["embedding"]["cache"]["enabled"]:
-            return
-        
-        try:
-            # Create a filename from the entity ID (using a hash to avoid invalid filenames)
-            entity_hash = hashlib.md5(entity_embeddings.entity_id.encode()).hexdigest()
-            file_name = f"{entity_hash}.json"
-            file_path = os.path.join(self.cache_dir, file_name)
-            
-            # Save the embeddings to file
-            with open(file_path, 'w') as f:
-                json.dump(entity_embeddings.to_dict(), f)
-            
-            # Update the index file
-            index_file = os.path.join(self.cache_dir, "index.json")
-            index = {}
-            
-            if os.path.exists(index_file):
-                with open(index_file, 'r') as f:
-                    index = json.load(f)
-            
-            index[entity_embeddings.entity_id] = file_name
-            
-            with open(index_file, 'w') as f:
-                json.dump(index, f)
-                
-        except Exception as e:
-            print(f"Error saving embedding to cache: {str(e)}")
-    
-    def get_embedding(self, text: str) -> np.ndarray:
+    def get_client(self):
+        """Lazy loads OpenAI client."""
+        if self._client is None:
+            self._client = OpenAI()
+        return self._client
+
+    def get_embedding(self, text: str) -> Optional[np.ndarray]:
         """
         Get the embedding for a text string using OpenAI's API.
         
@@ -184,24 +152,19 @@ class EntityEmbeddingGenerator:
         Returns:
             NumPy array containing the embedding vector
         """
+        if not text or not isinstance(text, str):
+            return None
         try:
-            # Get the embedding model from config
-            embedding_model = MODEL_CONFIG["models"]["embedding"]
-            
-            # Call OpenAI API to generate embedding
-            response = client.embeddings.create(
-                model=embedding_model,
-                input=text
+            response = self.get_client().embeddings.create(
+                model=self.embedding_model,
+                input=[text] # API expects a list
             )
-            
-            # Extract embedding
             embedding = response.data[0].embedding
-            return np.array(embedding)
-            
+            return np.array(embedding, dtype=np.float32)
         except Exception as e:
-            print(f"Error generating embedding: {str(e)}")
-            # Return a zero vector with the correct dimensions
-            return np.zeros(MODEL_CONFIG["embedding"]["dimensions"])
+            print(f"Error generating embedding for text snippet: {e}")
+            # Return zero vector on error? Or handle upstream?
+            return np.zeros(self.dimensions, dtype=np.float32)
     
     def get_entity_id(self, entity: CodeEntity) -> str:
         """
@@ -213,7 +176,7 @@ class EntityEmbeddingGenerator:
         Returns:
             String containing the entity ID
         """
-        return f"{entity.name}:{entity.source_file}:{entity.lineno}"
+        return f"{entity.source_file}:{entity.__class__.__name__}:{entity.name}:{entity.lineno}"
     
     def extract_name_and_signature(self, entity: CodeEntity) -> str:
         """
@@ -269,314 +232,238 @@ class EntityEmbeddingGenerator:
         # Default case
         return entity.name
     
-    def extract_docstring_and_comments(self, entity: CodeEntity, context_lines: int = 5) -> str:
+    def extract_docstring_and_comments(self, entity: CodeEntity, context_lines: int = 0) -> str:
         """
-        Extract docstring and nearby comments for a code entity.
+        Extract the docstring and comments for a code entity.
         
         Args:
             entity: Code entity
-            context_lines: Number of context lines to consider
+            context_lines: Number of context lines to include
             
         Returns:
-            String containing docstring and comments
+            String containing the docstring and comments
         """
-        result = []
+        docstring = entity.docstring if hasattr(entity, 'docstring') else ""
         
-        # Add docstring if available
-        if hasattr(entity, 'docstring') and entity.docstring:
-            result.append(entity.docstring)
+        # Get comments from the code
+        code_with_context = extract_code_with_context(entity, context_lines)
         
-        # Extract code context
-        context = extract_code_with_context(entity, context_lines)
-        
-        # Extract comments from context
-        lines = context.split('\n')
-        for line in lines:
+        # Simple comment extraction (can be improved)
+        comments = []
+        for line in code_with_context.split('\n'):
             line = line.strip()
-            if line.startswith('#'):
-                result.append(line[1:].strip())
-            elif '#' in line:
-                # Get in-line comment
-                comment = line.split('#', 1)[1].strip()
-                if comment:
-                    result.append(comment)
-        
-        return '\n'.join(result)
+            if line.startswith('#') or line.startswith('//'):
+                comments.append(line)
+                
+        # Combine docstring and comments
+        result = []
+        if docstring:
+            result.append(f"Docstring: {docstring}")
+        if comments:
+            result.append("Comments: " + " ".join(comments))
+            
+        return "\n".join(result)
     
-    def generate_embeddings_for_entity(self, 
-                                      entity: CodeEntity, 
-                                      context_lines: int = 5,
-                                      use_cache: bool = True) -> EntityEmbeddings:
+    def generate_embeddings_for_entity(self, entity: CodeEntity, context_lines: int) -> Optional[EntityEmbeddings]:
         """
         Generate all embeddings for a code entity.
         
         Args:
             entity: Code entity
             context_lines: Number of context lines to consider
-            use_cache: Whether to use cached embeddings
             
         Returns:
             EntityEmbeddings object with all embeddings
         """
-        # Generate entity ID
         entity_id = self.get_entity_id(entity)
+        entity_embeddings = EntityEmbeddings(entity_id)
+        added_to_faiss = False
         
-        # Check if we have cached embeddings
-        if use_cache and entity_id in self.embeddings_cache:
-            return self.embeddings_cache[entity_id]
+        # Generate Full Code Embedding
+        code_text = extract_code_with_context(entity, context_lines)
+        embedding = self.get_embedding(code_text)
+        if embedding is not None:
+            entity_embeddings.full_code_embedding = embedding
+            if self.faiss_enabled and self.faiss_manager:
+                self.faiss_manager.add_embeddings("full_code", [entity_id], embedding.reshape(1, -1))
+                added_to_faiss = True
         
-        # Create new embeddings
-        embeddings = EntityEmbeddings(entity_id)
+        # Generate Name/Signature Embedding
+        signature_text = self.extract_name_and_signature(entity)
+        embedding = self.get_embedding(signature_text)
+        if embedding is not None:
+            entity_embeddings.name_signature_embedding = embedding
+            if self.faiss_enabled and self.faiss_manager:
+                self.faiss_manager.add_embeddings("name_signature", [entity_id], embedding.reshape(1, -1))
+                added_to_faiss = True
         
-        # 1. Generate full code embedding
-        full_code = extract_code_with_context(entity, context_lines)
-        embeddings.full_code_embedding = self.get_embedding(full_code)
+        # Generate Docstring/Comment Embedding
+        doc_text = self.extract_docstring_and_comments(entity, context_lines=0)
+        if doc_text:
+            embedding = self.get_embedding(doc_text)
+            if embedding is not None:
+                entity_embeddings.docstring_embedding = embedding
+                if self.faiss_enabled and self.faiss_manager:
+                    self.faiss_manager.add_embeddings("docstring", [entity_id], embedding.reshape(1, -1))
+                    added_to_faiss = True
         
-        # 2. Generate name and signature embedding
-        name_signature = self.extract_name_and_signature(entity)
-        embeddings.name_signature_embedding = self.get_embedding(name_signature)
-        
-        # 3. Generate docstring and comments embedding
-        docstring_comments = self.extract_docstring_and_comments(entity, context_lines)
-        if docstring_comments:
-            embeddings.docstring_embedding = self.get_embedding(docstring_comments)
-        
-        # Set last updated timestamp
-        embeddings.last_updated = time.time()
-        
-        # Cache the embeddings
-        self.embeddings_cache[entity_id] = embeddings
-        self._save_to_cache(embeddings)
-        
-        return embeddings
+        return entity_embeddings if added_to_faiss else None
     
-    def generate_embeddings_for_entities(self, 
-                                        entities: Dict[str, List[CodeEntity]],
-                                        context_lines: int = 5,
-                                        use_cache: bool = True) -> Dict[str, EntityEmbeddings]:
+    def generate_embeddings_for_entities(self, entities_input, context_lines: int = 5):
         """
-        Generate embeddings for all entities.
+        Generate embeddings for multiple entities.
         
         Args:
-            entities: Dictionary of entities by type
-            context_lines: Number of context lines to consider
-            use_cache: Whether to use cached embeddings
+            entities_input: Either a dictionary of entity lists or a flat list of entities
+            context_lines: Number of context lines to include
             
         Returns:
-            Dictionary mapping entity IDs to EntityEmbeddings objects
+            Tuple containing (list of entity_ids, list of embeddings)
         """
-        results = {}
-        total_entities = sum(len(entity_list) for entity_list in entities.values())
+        # Determine the input type and process accordingly
+        if isinstance(entities_input, dict):
+            # Dictionary of entity lists (by type)
+            all_entities = []
+            for entity_list in entities_input.values():
+                all_entities.extend(entity_list)
+        elif isinstance(entities_input, list):
+            # Already a flat list of entities
+            all_entities = entities_input
+        else:
+            raise ValueError(f"Invalid input type: {type(entities_input)}. Expected dict or list.")
         
-        # Process entities with a progress bar
-        with tqdm(total=total_entities, desc="Generating embeddings") as pbar:
-            for entity_type, entity_list in entities.items():
-                for entity in entity_list:
-                    # Generate entity ID
-                    entity_id = self.get_entity_id(entity)
-                    
-                    # Generate embeddings
-                    embeddings = self.generate_embeddings_for_entity(
-                        entity, context_lines, use_cache
+        entity_ids = []
+        embeddings = []
+        
+        # Process all entities with progress bar
+        for i, entity in enumerate(tqdm(all_entities, desc="Generating Embeddings")):
+            # Get the entity ID
+            entity_id = self.get_entity_id(entity)
+            
+            # Generate embeddings
+            entity_embeddings = self.generate_embeddings_for_entity(entity, context_lines)
+            
+            if entity_embeddings is None or entity_embeddings.full_code_embedding is None:
+                # Skip if embeddings couldn't be generated
+                continue
+                
+            # Store entity ID and embedding
+            entity_ids.append(entity_id)
+            embeddings.append(entity_embeddings.full_code_embedding)
+            
+            # Add to FAISS index if enabled
+            if self.faiss_enabled and self.faiss_manager is not None:
+                try:
+                    # Add to the full_code index
+                    self.faiss_manager.add_vector(
+                        index_name="full_code",
+                        vector=entity_embeddings.full_code_embedding,
+                        metadata={"entity_id": entity_id}
                     )
+                    print(f"Added 1 vectors to index 'full_code'. Total vectors: {self.faiss_manager.get_index_size('full_code')}")
                     
-                    # Store results
-                    results[entity_id] = embeddings
+                    # Add to the name_signature index if available
+                    if entity_embeddings.name_signature_embedding is not None:
+                        self.faiss_manager.add_vector(
+                            index_name="name_signature",
+                            vector=entity_embeddings.name_signature_embedding,
+                            metadata={"entity_id": entity_id}
+                        )
+                        print(f"Added 1 vectors to index 'name_signature'. Total vectors: {self.faiss_manager.get_index_size('name_signature')}")
                     
-                    # Update progress bar
-                    pbar.update(1)
-                    
-                    # Add a small delay to avoid API rate limits
-                    time.sleep(0.1)
+                    # Add to the docstring index if available
+                    if entity_embeddings.docstring_embedding is not None:
+                        self.faiss_manager.add_vector(
+                            index_name="docstring",
+                            vector=entity_embeddings.docstring_embedding,
+                            metadata={"entity_id": entity_id}
+                        )
+                        print(f"Added 1 vectors to index 'docstring'. Total vectors: {self.faiss_manager.get_index_size('docstring')}")
+                except Exception as e:
+                    print(f"Error adding entity {entity_id} to FAISS index: {e}")
         
-        return results
+        # Save FAISS indices if enabled
+        if self.faiss_enabled and self.faiss_manager is not None:
+            try:
+                self.faiss_manager.save_all_indices()
+            except Exception as e:
+                print(f"Error saving FAISS indices: {e}")
+        
+        return entity_ids, np.array(embeddings)
     
-    def find_similar_entities(self, 
-                             query_entity: CodeEntity,
-                             entities: Dict[str, List[CodeEntity]],
-                             embedding_type: str = "full_code",
-                             top_k: int = 5,
-                             threshold: float = 0.7) -> List[Tuple[CodeEntity, float]]:
+    def find_similar_entities(self,
+                              query_text: str, 
+                              embedding_type: str = 'full_code', 
+                              top_k: int = 10, 
+                              min_similarity: Optional[float] = None # Similarity check done by caller now
+                             ) -> List[Tuple[str, float]]:
         """
         Find entities similar to the query entity.
         
         Args:
-            query_entity: Entity to find similar entities for
-            entities: Dictionary of entities to search in
+            query_text: Entity to find similar entities for
             embedding_type: Type of embedding to use for comparison
-                           (options: full_code, name_signature, docstring)
             top_k: Number of similar entities to return
-            threshold: Minimum similarity threshold
+            min_similarity: Minimum similarity threshold
             
         Returns:
-            List of tuples containing (entity, similarity score)
+            List of tuples containing (entity_id, similarity_score)
         """
-        # Generate embeddings for the query entity
-        query_embeddings = self.generate_embeddings_for_entity(query_entity)
-        
-        # Get the appropriate embedding vector based on the type
-        if embedding_type == "name_signature":
-            query_vector = query_embeddings.name_signature_embedding
-        elif embedding_type == "docstring":
-            query_vector = query_embeddings.docstring_embedding
-        else:  # Default to full_code
-            query_vector = query_embeddings.full_code_embedding
-        
-        # If no embedding is available for the requested type, return empty list
-        if query_vector is None:
+        if not self.faiss_enabled or not self.faiss_manager:
+            print("FAISS is not enabled or manager not available for similarity search.")
             return []
-        
-        # Prepare a flat list of all entities
-        all_entities = []
-        for entity_list in entities.values():
-            all_entities.extend(entity_list)
-        
-        # Calculate similarity scores
-        similarities = []
-        for entity in all_entities:
-            # Skip self-comparison
-            if entity.name == query_entity.name and entity.lineno == query_entity.lineno and entity.source_file == query_entity.source_file:
-                continue
-            
-            # Generate embeddings for this entity
-            entity_embeddings = self.generate_embeddings_for_entity(entity)
-            
-            # Get the appropriate embedding vector based on the type
-            if embedding_type == "name_signature":
-                entity_vector = entity_embeddings.name_signature_embedding
-            elif embedding_type == "docstring":
-                entity_vector = entity_embeddings.docstring_embedding
-            else:  # Default to full_code
-                entity_vector = entity_embeddings.full_code_embedding
-            
-            # Skip if no embedding is available for this type
-            if entity_vector is None:
-                continue
-            
-            # Calculate cosine similarity
-            similarity = self.cosine_similarity(query_vector, entity_vector)
-            
-            # Add to results if above threshold
-            if similarity >= threshold:
-                similarities.append((entity, similarity))
-        
-        # Sort by similarity score (descending)
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return top_k results
-        return similarities[:top_k]
-    
-    def cosine_similarity(self, v1: np.ndarray, v2: np.ndarray) -> float:
-        """
-        Calculate cosine similarity between two vectors.
-        
-        Args:
-            v1: First vector
-            v2: Second vector
-            
-        Returns:
-            Cosine similarity (0-1)
-        """
-        norm1 = np.linalg.norm(v1)
-        norm2 = np.linalg.norm(v2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-            
-        dot_product = np.dot(v1, v2)
-        return dot_product / (norm1 * norm2)
-    
-    def save_embeddings(self, output_dir: Optional[str] = None) -> None:
-        """
-        Save all embeddings to files.
-        
-        Args:
-            output_dir: Directory to save embeddings (uses cache_dir if None)
-        """
-        save_dir = output_dir if output_dir else self.cache_dir
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Create an index of all embeddings
-        index = {}
-        
-        # Save each embedding
-        for entity_id, embeddings in self.embeddings_cache.items():
-            # Create a filename from the entity ID
-            entity_hash = hashlib.md5(entity_id.encode()).hexdigest()
-            file_name = f"{entity_hash}.json"
-            file_path = os.path.join(save_dir, file_name)
-            
-            # Save to file
-            with open(file_path, 'w') as f:
-                json.dump(embeddings.to_dict(), f)
-            
-            # Add to index
-            index[entity_id] = file_name
-        
-        # Save the index
-        index_path = os.path.join(save_dir, "index.json")
-        with open(index_path, 'w') as f:
-            json.dump(index, f)
-    
-    def load_embeddings(self, input_dir: str) -> None:
-        """
-        Load embeddings from files.
-        
-        Args:
-            input_dir: Directory containing embedding files
-        """
-        if not os.path.exists(input_dir):
-            print(f"Embeddings directory does not exist: {input_dir}")
-            return
-        
-        # Load the index file
-        index_path = os.path.join(input_dir, "index.json")
-        if not os.path.exists(index_path):
-            print(f"Embeddings index file not found: {index_path}")
-            return
-        
-        with open(index_path, 'r') as f:
-            index = json.load(f)
-        
-        # Load each embedding file
-        for entity_id, file_name in index.items():
-            file_path = os.path.join(input_dir, file_name)
-            
-            if os.path.exists(file_path):
-                with open(file_path, 'r') as f:
-                    data = json.load(f)
-                    self.embeddings_cache[entity_id] = EntityEmbeddings.from_dict(data)
-        
-        self.loaded_cache = True
+
+        query_embedding = self.get_embedding(query_text)
+        if query_embedding is None:
+            print("Could not generate embedding for query text.")
+            return []
+
+        # Perform search using FaissManager
+        # The FaissManager.search method now returns sorted (id, similarity) tuples
+        similar_ids_scores = self.faiss_manager.search(
+            index_name=embedding_type, # Use the specific index
+            query_vector=query_embedding,
+            top_k=top_k
+        )
+
+        # Optional: Filter further by min_similarity if needed, 
+        # though thresholding might be better handled by the caller (SearchEngine)
+        if min_similarity is not None:
+             similar_ids_scores = [(id, score) for id, score in similar_ids_scores if score >= min_similarity]
+             
+        return similar_ids_scores
 
 
 # Utility function to use in other modules
 def generate_entity_embeddings(entities: Dict[str, List[CodeEntity]], 
-                              cache_dir: Optional[str] = None,
-                              context_lines: int = 5) -> Dict[str, EntityEmbeddings]:
+                              faiss_manager: Optional[FaissIndexManager] = None,
+                              context_lines: int = 5) -> None:
     """
     Generate embeddings for code entities.
     
     Args:
         entities: Dictionary of entities by type
-        cache_dir: Directory to cache embeddings
+        faiss_manager: Optional FaissIndexManager instance
         context_lines: Number of context lines to consider
-        
-    Returns:
-        Dictionary mapping entity IDs to EntityEmbeddings objects
     """
     # Set the embedding model to text-embedding-ada-002
     set_embedding_model("text-embedding-ada-002")
     
     # Create the embedding generator
-    generator = EntityEmbeddingGenerator(cache_dir)
+    generator = EntityEmbeddingGenerator(faiss_manager)
     
     # Generate embeddings for all entities
-    embeddings = generator.generate_embeddings_for_entities(
-        entities, context_lines=context_lines
-    )
+    generator.generate_embeddings_for_entities(entities, context_lines)
     
-    # Save embeddings to cache
-    generator.save_embeddings()
+    # Save embeddings to FAISS
+    generator.faiss_manager.save_all_indices()
     
-    return embeddings 
+    print("Finished generating and indexing embeddings.")
+
+# Cosine similarity function is removed as FAISS handles similarity search
+# def cosine_similarity(v1, v2):
+#    ...
+
+# Cosine similarity function is removed as FAISS handles similarity search
+# def cosine_similarity(v1, v2):
+#    ... 

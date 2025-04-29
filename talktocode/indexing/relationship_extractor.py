@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple, Any, Optional, Set
 import openai
 from collections import defaultdict
 import numpy as np
+from tenacity import retry, wait_random_exponential, stop_after_attempt
 
 # Import local modules
 import sys
@@ -15,6 +16,14 @@ from talktocode.indexing.entity_embeddings import generate_entity_embeddings, En
 
 # Configure OpenAI
 openai.api_key = OPENAI_API_KEY
+# Import the OpenAI client
+from openai import OpenAI
+
+# Use lazy initialization to avoid recursion issues
+def get_client():
+    """Get or initialize the OpenAI client."""
+    client = OpenAI()
+    return client
 
 # Relationship types
 RELATIONSHIP_TYPES = [
@@ -146,8 +155,11 @@ def analyze_entity_pair(entity1: CodeEntity, entity2: CodeEntity,
     
     # Call OpenAI API
     try:
+        # Initialize the OpenAI client
+        client = get_client()
+        
         chat_model = MODEL_CONFIG["models"]["chat"]
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=chat_model,
             messages=[
                 {"role": "system", "content": "You are a code analysis assistant that identifies relationships between code entities."},
@@ -158,7 +170,7 @@ def analyze_entity_pair(entity1: CodeEntity, entity2: CodeEntity,
         )
         
         # Extract and parse response
-        content = response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
         
         # Try to extract JSON from the response
         try:
@@ -360,97 +372,106 @@ def extract_implicit_relationships(entities: Dict[str, List[CodeEntity]]) -> Lis
 def extract_semantic_relationships(entities: Dict[str, List[CodeEntity]], 
                                 cache_dir: Optional[str] = None,
                                 similarity_threshold: float = 0.75,
-                                max_relationships_per_entity: int = 5) -> List[Relationship]:
+                                max_relationships_per_entity: int = 5,
+                                max_entities_to_process: int = 100) -> List[Relationship]:
     """
-    Extract semantic relationships between code entities using embeddings.
+    Extract semantic relationships between entities based on text similarity.
     
     Args:
-        entities: Dictionary of entities by type
-        cache_dir: Directory to cache embeddings
-        similarity_threshold: Minimum similarity threshold
-        max_relationships_per_entity: Maximum number of semantic relationships per entity
-    
+        entities: Dictionary of code entities
+        cache_dir: Directory to cache embeddings (optional)
+        similarity_threshold: Threshold for similarity score
+        max_relationships_per_entity: Maximum number of relationships per entity
+        max_entities_to_process: Maximum number of entities to process
+        
     Returns:
         List of semantic relationships
     """
-    print("Extracting semantic relationships using embeddings...")
-    
     # Initialize embedding generator
-    embedding_generator = EntityEmbeddingGenerator(cache_dir)
+    embedding_generator = EntityEmbeddingGenerator()
     
-    # Create a flat list of all entities
+    # Flatten the dictionary of entities
     all_entities = []
     for entity_list in entities.values():
         all_entities.extend(entity_list)
     
-    # Store all relationships
+    # Limit the number of entities if specified
+    if max_entities_to_process and len(all_entities) > max_entities_to_process:
+        print(f"Limiting semantic analysis to {max_entities_to_process} entities (out of {len(all_entities)})")
+        all_entities = all_entities[:max_entities_to_process]
+    
+    # Generate or load embeddings
+    print(f"Generating embeddings for {len(all_entities)} entities...")
+    entity_ids, embeddings = embedding_generator.generate_embeddings_for_entities(all_entities)
+    print(f"Generated {len(embeddings)} embeddings")
+    
+    # Create a mapping from entity ID to entity object for efficient lookup
+    entity_map = {}
+    for entity in all_entities:
+        # Generate a consistent ID for the entity to match what's used in the embeddings
+        entity_id = f"{entity.source_file}:{entity.__class__.__name__}:{entity.name}:{entity.lineno}"
+        entity_map[entity_id] = entity
+    
+    # Find pairs of entities with high similarity
     relationships = []
+    processed_entity_count = 0
     
-    # Track processed pairs to avoid duplicates
-    processed_pairs = set()
-    
-    # Generate embeddings for all entities first to utilize caching
-    _ = embedding_generator.generate_embeddings_for_entities(entities)
-    
-    # Configuration for similarity types
-    similarity_types = [
-        # (embedding_type, description_prefix, threshold_modifier)
-        ("full_code", "Similar implementation context", 0.0),
-        ("name_signature", "Similar function/class signature", -0.05),  # Lower threshold slightly
-        ("docstring", "Similar documentation", -0.1)  # Lower threshold more for docstrings
-    ]
-    
-    # For each entity, find related entities
-    print(f"Finding semantic relationships for {len(all_entities)} entities...")
-    for i, entity in enumerate(all_entities):
-        if i % 10 == 0:
-            print(f"Processed {i}/{len(all_entities)} entities...")
+    for i, entity_id1 in enumerate(entity_ids):
+        # Skip invalid entity IDs
+        if entity_id1 not in entity_map:
+            continue
+            
+        entity1 = entity_map[entity_id1]
+        embedding1 = embeddings[i]
         
-        # Try each similarity type
-        for embedding_type, description_prefix, threshold_modifier in similarity_types:
-            # Adjust threshold based on similarity type
-            adjusted_threshold = similarity_threshold + threshold_modifier
+        # Create an array of all other embeddings
+        other_embeddings = embeddings.copy()
+        
+        # Calculate dot product for all pairs (vectorized)
+        # Normalize embeddings - ensures dot product is same as cosine similarity
+        embedding1_normalized = embedding1 / np.linalg.norm(embedding1)
+        other_embeddings_normalized = other_embeddings / np.linalg.norm(other_embeddings, axis=1, keepdims=True)
+        
+        # Calculate similarities using vectorized dot product
+        similarities = np.dot(other_embeddings_normalized, embedding1_normalized)
+        
+        # Get indices of top similar entities (excluding self)
+        top_indices = np.argsort(similarities)[::-1]  # Descending order
+        top_indices = top_indices[1:max_relationships_per_entity+1]  # Skip self
+        
+        # Create relationships for pairs above threshold
+        for idx in top_indices:
+            similarity = similarities[idx]
+            if similarity < similarity_threshold:
+                continue
+                
+            entity_id2 = entity_ids[idx]
             
-            # Find similar entities
-            similar_entities = embedding_generator.find_similar_entities(
-                query_entity=entity,
-                entities=entities,
-                embedding_type=embedding_type,
-                top_k=max_relationships_per_entity,
-                threshold=adjusted_threshold
+            # Skip if entity2 is not in the entity map
+            if entity_id2 not in entity_map:
+                print(f"Warning: Could not find entity with ID {entity_id2}")
+                continue
+            
+            entity2 = entity_map[entity_id2]
+            
+            # Skip self-references
+            if entity1.source_file == entity2.source_file and entity1.lineno == entity2.lineno:
+                continue
+            
+            # Create the relationship
+            description = f"These entities have semantically similar code with cosine similarity of {similarity:.2f}"
+            relationship = Relationship(
+                source=entity1,
+                target=entity2,
+                relationship_type="SEMANTICALLY_SIMILAR",
+                strength=int(similarity * 10),  # Scale 0-1 to 1-10
+                description=description
             )
-            
-            # Create relationships
-            for similar_entity, similarity_score in similar_entities:
-                # Skip if we've already processed this pair
-                pair_id = (
-                    f"{entity.name}:{entity.source_file}:{entity.lineno}",
-                    f"{similar_entity.name}:{similar_entity.source_file}:{similar_entity.lineno}"
-                )
-                
-                if pair_id in processed_pairs:
-                    continue
-                
-                # Add to processed pairs (in both directions)
-                processed_pairs.add(pair_id)
-                processed_pairs.add((pair_id[1], pair_id[0]))
-                
-                # Calculate strength (1-10 scale)
-                strength = int(round(similarity_score * 10))
-                
-                # Description based on embedding type
-                description = f"{description_prefix}: {similarity_score:.2f} similarity score"
-                
-                # Create relationship
-                relationship = Relationship(
-                    source=entity,
-                    target=similar_entity,
-                    relationship_type="SEMANTICALLY_SIMILAR",
-                    strength=strength,
-                    description=description
-                )
-                
-                relationships.append(relationship)
+            relationships.append(relationship)
+        
+        processed_entity_count += 1
+        if processed_entity_count % 10 == 0:
+            print(f"Processed {processed_entity_count}/{len(all_entities)} entities...")
     
     print(f"Found {len(relationships)} semantic relationships")
     return relationships
@@ -460,6 +481,8 @@ def extract_all_relationships(entities: Dict[str, List[CodeEntity]],
                             use_llm: bool = True,
                             use_embeddings: bool = True,
                             max_llm_pairs: Optional[int] = 100,
+                            max_entities_for_embeddings: int = 100,
+                            max_total_relationships: int = 1000,
                             cache_dir: Optional[str] = None) -> List[Relationship]:
     """
     Extract all relationships between code entities.
@@ -469,6 +492,8 @@ def extract_all_relationships(entities: Dict[str, List[CodeEntity]],
         use_llm: Whether to use LLM to analyze relationships
         use_embeddings: Whether to use embeddings for semantic relationships
         max_llm_pairs: Maximum number of entity pairs to analyze with LLM
+        max_entities_for_embeddings: Maximum number of entities to process for embeddings
+        max_total_relationships: Maximum total relationships to return
         cache_dir: Directory to cache embeddings
     
     Returns:
@@ -476,7 +501,17 @@ def extract_all_relationships(entities: Dict[str, List[CodeEntity]],
     """
     relationships = []
     
-    # Extract implicit relationships from code structure
+    # First, count total entities to determine if we need more aggressive optimization
+    total_entities = sum(len(entities[entity_type]) for entity_type in entities)
+    print(f"Processing {total_entities} total entities")
+    
+    # For larger codebases, automatically adjust parameters
+    if total_entities > 200:
+        print(f"Large codebase detected ({total_entities} entities). Adjusting processing parameters.")
+        max_entities_for_embeddings = min(max_entities_for_embeddings, 50)
+        max_llm_pairs = min(max_llm_pairs, 50)
+    
+    # Extract implicit relationships from code structure - these are fast and usually accurate
     print("Extracting implicit relationships...")
     implicit_relationships = extract_implicit_relationships(entities)
     relationships.extend(implicit_relationships)
@@ -486,25 +521,42 @@ def extract_all_relationships(entities: Dict[str, List[CodeEntity]],
     if use_embeddings:
         print("Extracting semantic relationships using embeddings...")
         semantic_relationships = extract_semantic_relationships(
-            entities, cache_dir=cache_dir
+            entities, 
+            cache_dir=cache_dir,
+            max_entities_to_process=max_entities_for_embeddings
         )
         relationships.extend(semantic_relationships)
         print(f"Found {len(semantic_relationships)} semantic relationships.")
     
-    # Use LLM to extract more complex relationships
-    if use_llm:
-        print("Extracting relationships using LLM...")
-        llm_relationships = extract_relationships_from_entities(
-            entities, max_pairs=max_llm_pairs
-        )
-        relationships.extend(llm_relationships)
-        print(f"Found {len(llm_relationships)} LLM-identified relationships.")
+    # Use LLM to extract more complex relationships - most expensive, do last and potentially skip
+    if use_llm and len(relationships) < max_total_relationships:
+        remaining_slots = max_total_relationships - len(relationships)
+        adjusted_max_pairs = min(max_llm_pairs, remaining_slots)
+        
+        if adjusted_max_pairs > 0:
+            print(f"Extracting relationships using LLM (limited to {adjusted_max_pairs} pairs)...")
+            llm_relationships = extract_relationships_from_entities(
+                entities, max_pairs=adjusted_max_pairs
+            )
+            relationships.extend(llm_relationships)
+            print(f"Found {len(llm_relationships)} LLM-identified relationships.")
+        else:
+            print("Skipping LLM relationship extraction - already have enough relationships")
     
     # Remove duplicate relationships
     unique_relationships = []
     relationship_pairs = set()
     
-    for rel in relationships:
+    # Sort relationships by strength to keep the strongest ones if we need to limit
+    sorted_relationships = sorted(relationships, key=lambda r: r.strength, reverse=True)
+    
+    # Limit to max_total_relationships
+    if len(sorted_relationships) > max_total_relationships:
+        print(f"Limiting to top {max_total_relationships} strongest relationships (out of {len(sorted_relationships)})")
+        sorted_relationships = sorted_relationships[:max_total_relationships]
+    
+    # Now filter for uniqueness
+    for rel in sorted_relationships:
         # Create a tuple to identify the relationship
         rel_key = (
             rel.source.name, rel.source.source_file, rel.source.lineno,
@@ -566,8 +618,11 @@ Provide a concise description (1-3 sentences) of this {entity_type}'s purpose an
     
     # Call OpenAI API
     try:
+        # Initialize the OpenAI client
+        client = get_client()
+        
         chat_model = MODEL_CONFIG["models"]["chat"]
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=chat_model,
             messages=[
                 {"role": "system", "content": "You are a code analysis assistant that identifies the purpose of code entities."},
@@ -578,7 +633,7 @@ Provide a concise description (1-3 sentences) of this {entity_type}'s purpose an
         )
         
         # Extract response
-        return response.choices[0].message.content.strip()
+        return response.choices[0].message.content
         
     except Exception as e:
         print(f"Error calling OpenAI API: {str(e)}")
