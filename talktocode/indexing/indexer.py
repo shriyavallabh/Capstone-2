@@ -367,11 +367,29 @@ class CodeIndexer:
         # Get the maximum number of entities to process from config
         max_entities = self.config.get("max_entities_for_purposes", 100)
         
-        # Extract purposes using GPT-3.5
+        # 1) Primary pass – use the existing bulk LLM enrichment helper
         self.entity_purposes = enrich_entities_with_purpose(self.entities, max_entities=max_entities)
-        
+
+        # 2) Fallback pass – for entities that still lack a description, use a quick
+        #    one-sentence summariser powered by OpenAI and cached on disk.
+        try:
+            from talktocode.indexing.llm_enricher import summarize_entity
+            missing = 0
+            for file_path, ents in self.entities.items():
+                for ent in ents:
+                    eid = ent.to_dict().get("name")
+                    if eid not in self.entity_purposes or not self.entity_purposes[eid].get("purpose"):
+                        # Generate summary on the fly
+                        summary = summarize_entity(ent.to_dict())
+                        self.entity_purposes[eid] = {"purpose": summary}
+                        missing += 1
+            if missing:
+                print(f"[Indexer] Added LLM summaries for {missing} entities without docstrings")
+        except Exception as e:
+            print(f"[Indexer] llm_enricher fallback failed: {e}")
+
         # Update progress
-        self.progress.update(stage=f"Extracted purposes for {len(self.entity_purposes)} entities")
+        self.progress.update(stage=f"Extracted purposes for {len(self.entity_purposes)} entities (incl. summaries)")
     
     def _extract_relationships(self) -> None:
         """Extract relationships between entities."""

@@ -285,7 +285,11 @@ class EntityEmbeddingGenerator:
         if embedding is not None:
             entity_embeddings.full_code_embedding = embedding
             if self.faiss_enabled and self.faiss_manager:
-                self.faiss_manager.add_embeddings("full_code", [entity_id], embedding.reshape(1, -1))
+                self.faiss_manager.add_embeddings(
+                    index_name="full_code",
+                    ids=[entity_id],
+                    embeddings=embedding.reshape(1, -1)
+                )
                 added_to_faiss = True
         
         # Generate Name/Signature Embedding
@@ -294,7 +298,11 @@ class EntityEmbeddingGenerator:
         if embedding is not None:
             entity_embeddings.name_signature_embedding = embedding
             if self.faiss_enabled and self.faiss_manager:
-                self.faiss_manager.add_embeddings("name_signature", [entity_id], embedding.reshape(1, -1))
+                self.faiss_manager.add_embeddings(
+                    index_name="name_signature",
+                    ids=[entity_id],
+                    embeddings=embedding.reshape(1, -1)
+                )
                 added_to_faiss = True
         
         # Generate Docstring/Comment Embedding
@@ -304,7 +312,11 @@ class EntityEmbeddingGenerator:
             if embedding is not None:
                 entity_embeddings.docstring_embedding = embedding
                 if self.faiss_enabled and self.faiss_manager:
-                    self.faiss_manager.add_embeddings("docstring", [entity_id], embedding.reshape(1, -1))
+                    self.faiss_manager.add_embeddings(
+                        index_name="docstring",
+                        ids=[entity_id],
+                        embeddings=embedding.reshape(1, -1)
+                    )
                     added_to_faiss = True
         
         return entity_embeddings if added_to_faiss else None
@@ -355,28 +367,28 @@ class EntityEmbeddingGenerator:
             if self.faiss_enabled and self.faiss_manager is not None:
                 try:
                     # Add to the full_code index
-                    self.faiss_manager.add_vector(
+                    self.faiss_manager.add_embeddings(
                         index_name="full_code",
-                        vector=entity_embeddings.full_code_embedding,
-                        metadata={"entity_id": entity_id}
+                        ids=[entity_id],
+                        embeddings=entity_embeddings.full_code_embedding.reshape(1, -1)
                     )
                     print(f"Added 1 vectors to index 'full_code'. Total vectors: {self.faiss_manager.get_index_size('full_code')}")
                     
                     # Add to the name_signature index if available
                     if entity_embeddings.name_signature_embedding is not None:
-                        self.faiss_manager.add_vector(
+                        self.faiss_manager.add_embeddings(
                             index_name="name_signature",
-                            vector=entity_embeddings.name_signature_embedding,
-                            metadata={"entity_id": entity_id}
+                            ids=[entity_id],
+                            embeddings=entity_embeddings.name_signature_embedding.reshape(1, -1)
                         )
                         print(f"Added 1 vectors to index 'name_signature'. Total vectors: {self.faiss_manager.get_index_size('name_signature')}")
                     
                     # Add to the docstring index if available
                     if entity_embeddings.docstring_embedding is not None:
-                        self.faiss_manager.add_vector(
+                        self.faiss_manager.add_embeddings(
                             index_name="docstring",
-                            vector=entity_embeddings.docstring_embedding,
-                            metadata={"entity_id": entity_id}
+                            ids=[entity_id],
+                            embeddings=entity_embeddings.docstring_embedding.reshape(1, -1)
                         )
                         print(f"Added 1 vectors to index 'docstring'. Total vectors: {self.faiss_manager.get_index_size('docstring')}")
                 except Exception as e:

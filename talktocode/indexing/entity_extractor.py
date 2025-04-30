@@ -102,21 +102,45 @@ class VariableEntity(CodeEntity):
 
 
 class ImportEntity(CodeEntity):
-    """Represents an import statement in the code."""
+    """Represents a *static* import statement (``import x`` or ``from y import x``)."""
     
     def __init__(self, name: str, lineno: int, end_lineno: int, source_file: str,
-                 import_from: Optional[str] = None, alias: Optional[str] = None):
+                 import_from: Optional[str] = None, alias: Optional[str] = None,
+                 description: str = "", code_snippet: str = ""):
         super().__init__(name, lineno, end_lineno, source_file)
         self.import_from = import_from
         self.alias = alias
+        self.description = description or "No description available"
+        self.code_snippet = code_snippet
         
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
         result.update({
             "import_from": self.import_from,
             "alias": self.alias,
+            "description": self.description,
+            "code_snippet": self.code_snippet,
         })
         return result
+
+
+# New entity type: dynamic import via importlib/__import__
+class DynamicImportEntity(CodeEntity):
+    """Represents a dynamic import like ``importlib.import_module('pkg')``."""
+    
+    def __init__(self, name: str, lineno: int, end_lineno: int, source_file: str,
+                 call_text: str = ""):
+        super().__init__(name, lineno, end_lineno, source_file)
+        self.description = f"Dynamic import of module '{name}'"
+        self.code_snippet = call_text
+        
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update({
+            "description": self.description,
+            "code_snippet": self.code_snippet,
+        })
+        return d
 
 
 class CodeEntityExtractor(ast.NodeVisitor):
@@ -339,12 +363,15 @@ class CodeEntityExtractor(ast.NodeVisitor):
         for name in node.names:
             end_lineno = getattr(node, 'end_lineno', node.lineno)
             
+            full_line = self.source_lines[node.lineno - 1]
             import_entity = ImportEntity(
                 name=name.name,
                 lineno=node.lineno,
                 end_lineno=end_lineno,
                 source_file=self.source_file,
-                alias=name.asname
+                alias=name.asname,
+                description=f"Import statement: {full_line.strip()}",
+                code_snippet=full_line.rstrip()
             )
             
             self.imports.append(import_entity)
@@ -355,13 +382,16 @@ class CodeEntityExtractor(ast.NodeVisitor):
         for name in node.names:
             end_lineno = getattr(node, 'end_lineno', node.lineno)
             
+            full_line = self.source_lines[node.lineno - 1]
             import_entity = ImportEntity(
                 name=name.name,
                 lineno=node.lineno,
                 end_lineno=end_lineno,
                 source_file=self.source_file,
                 import_from=module,
-                alias=name.asname
+                alias=name.asname,
+                description=f"Import statement: {full_line.strip()}",
+                code_snippet=full_line.rstrip()
             )
             
             self.imports.append(import_entity)
@@ -384,6 +414,40 @@ class CodeEntityExtractor(ast.NodeVisitor):
             if node.func.attr not in self.current_function.called_functions:
                 # Only store the method name, not the full path
                 self.current_function.called_functions.append(node.func.attr)
+        
+        # Detect dynamic imports: importlib.import_module('pkg') or __import__('pkg')
+        try:
+            if isinstance(node.func, ast.Attribute):
+                if (getattr(node.func, 'attr', '') == 'import_module' and
+                        isinstance(node.func.value, ast.Name) and node.func.value.id == 'importlib'):
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        mod_name = str(node.args[0].value)
+                    else:
+                        mod_name = '<dynamic>'
+                    full_line = self.source_lines[node.lineno - 1]
+                    dyn_ent = DynamicImportEntity(
+                        name=mod_name,
+                        lineno=node.lineno,
+                        end_lineno=getattr(node, 'end_lineno', node.lineno),
+                        source_file=self.source_file,
+                        call_text=full_line.rstrip()
+                    )
+                    self.imports.append(dyn_ent)
+            elif isinstance(node.func, ast.Name) and node.func.id == '__import__':
+                mod_name = '<dynamic>'
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    mod_name = str(node.args[0].value)
+                full_line = self.source_lines[node.lineno - 1]
+                dyn_ent = DynamicImportEntity(
+                    name=mod_name,
+                    lineno=node.lineno,
+                    end_lineno=getattr(node, 'end_lineno', node.lineno),
+                    source_file=self.source_file,
+                    call_text=full_line.rstrip()
+                )
+                self.imports.append(dyn_ent)
+        except Exception:
+            pass  # safety – don't break extraction on edge cases
         
         # Visit all child nodes
         for child in ast.iter_child_nodes(node):

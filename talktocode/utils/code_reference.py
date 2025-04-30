@@ -118,13 +118,14 @@ class CodeReference:
         return languages.get(ext, '')
 
 
-def format_code_references(references: List[CodeReference], 
-                          include_snippets: bool = True) -> str:
+# Accept List[CodeReference] *or* list of dicts produced elsewhere
+def format_code_references(references: List[Union['CodeReference', Dict[str, Any]]],
+                           include_snippets: bool = True) -> str:
     """
     Format a list of code references into a markdown string.
     
     Args:
-        references: List of CodeReference objects
+        references: List of CodeReference objects or dictionaries
         include_snippets: Whether to include code snippets in the output
         
     Returns:
@@ -135,7 +136,18 @@ def format_code_references(references: List[CodeReference],
     
     formatted = ["### Code References", ""]
     
-    for i, ref in enumerate(references, 1):
+    # Ensure every item is a CodeReference object
+    normalized_refs: List[CodeReference] = []
+    for item in references:
+        if isinstance(item, CodeReference):
+            normalized_refs.append(item)
+        elif isinstance(item, dict):
+            try:
+                normalized_refs.append(CodeReference.from_dict(item))
+            except Exception as e:
+                print(f"Warning: Could not convert dict to CodeReference: {e}. Skipping.")
+    
+    for i, ref in enumerate(normalized_refs, 1):
         # Add entity name and type if available
         if ref.entity_name and ref.entity_type:
             formatted.append(f"**{i}. {ref.entity_name}** ({ref.entity_type})")

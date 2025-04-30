@@ -87,13 +87,9 @@ Discuss tradeoffs between different approaches when relevant."""
     def get_client(self):
         """Get or initialize the OpenAI client."""
         if self._client is None:
-            try:
-                # Import the shared client function from the main app
-                from app import get_openai_client
-                self._client = get_openai_client()
-            except ImportError:
-                # Fallback if the import fails
-                self._client = OpenAI()
+            # Directly initialize the client to avoid importing the Streamlit app again
+            # Importing the `app` module inside Streamlit can cause a second `st.set_page_config` call.
+            self._client = OpenAI()
         return self._client
     
     def check_guardrails(self, query_text: str) -> Optional[str]:

@@ -71,9 +71,9 @@ class GraphSearchEngine:
         self.default_search_params = {
             "local": {
                 "max_hops": 2,
-                "top_k_entities": 10,
-                "min_similarity": 0.7,
-                "max_context_items": 20,
+                "top_k_entities": 20,
+                "min_similarity": 0.5,
+                "max_context_items": 30,
                 "include_code": True
             },
             "global": {
@@ -389,6 +389,105 @@ class GraphSearchEngine:
         if params:
             p.update(params)
             
+        # -------------------------------------
+        # Fast-path: import / module listing
+        # -------------------------------------
+        import_keywords = ["import", "imports", "modules", "packages"]
+        if any(k in query.lower() for k in import_keywords):
+            import_nodes = [
+                (n, d) for n, d in self.graph.graph.nodes(data=True)
+                if d.get("type") in ("Import", "DynamicImport")
+            ]
+
+            if import_nodes:
+                ranked = [
+                    {
+                        "id": n,
+                        "name": d.get("name"),
+                        "type": d.get("type"),
+                        "source_file": d.get("source_file"),
+                        "lineno": d.get("lineno"),
+                        "description": d.get("description", ""),
+                        "code_snippet": d.get("code_snippet", ""),
+                        "score": 1.0
+                    }
+                    for n, d in import_nodes
+                ]
+                context = self._collect_context(ranked, max_items=min(50, len(ranked)))
+                return {
+                    "query": query,
+                    "entities": ranked,
+                    "context": context,
+                    "status": "success"
+                }
+            else:
+                return {
+                    "query": query,
+                    "entities": [],
+                    "context": {"text": "No import statements (static or dynamic) found in the codebase."},
+                    "status": "no_results"
+                }
+
+        # -------------------------------------
+        # Fast-path: list functions / methods
+        # -------------------------------------
+        function_keywords = ["function", "functions", "def", "methods", "list all functions"]
+        if any(k in query.lower() for k in function_keywords):
+            func_nodes = [
+                (n, d) for n, d in self.graph.graph.nodes(data=True)
+                if d.get("type") == "Function"
+            ]
+            if func_nodes:
+                ranked = [
+                    {
+                        "id": n,
+                        "name": d.get("name"),
+                        "type": d.get("type"),
+                        "source_file": d.get("source_file"),
+                        "lineno": d.get("lineno"),
+                        "description": d.get("description", ""),
+                        "code_snippet": d.get("code_snippet", ""),
+                        "score": 1.0
+                    }
+                    for n, d in func_nodes
+                ]
+                context = self._collect_context(ranked, max_items=min(100, len(ranked)))
+                return {
+                    "query": query,
+                    "entities": ranked,
+                    "context": context,
+                    "status": "success"
+                }
+
+        # -------------------------------------
+        # Fast-path: high-level summary / about queries -> delegate to global_search
+        # -------------------------------------
+        summary_keywords = ["about", "overview", "summary", "explain", "codebase"]
+        if any(k in query.lower() for k in summary_keywords):
+            # Use global search for architectural overview
+            return self.global_search(query)
+
+        # --- Hybrid Search: Keyword + Embedding ---
+        query_lower = query.lower()
+        keyword_hits = []
+        for node_id, data in self.graph.graph.nodes(data=True):
+            # Search in name, description, docstring, code_snippet
+            text_fields = [
+                str(data.get('name', '')),
+                str(data.get('description', '')),
+                str(data.get('docstring', '')),
+                str(data.get('code_snippet', '')),
+            ]
+            if any(query_lower in field.lower() for field in text_fields):
+                keyword_hits.append((node_id, data))
+
+        # Remove duplicates by node_id
+        keyword_ids = set(n for n, _ in keyword_hits)
+
+        # -------------------------------------
+        # Standard embedding similarity flow
+        # -------------------------------------
+
         # Get query embedding using text-embedding-ada-002
         print(f"Generating embedding for query: '{query}'")
         query_embedding = self._get_embedding(query)
@@ -401,7 +500,19 @@ class GraphSearchEngine:
             min_similarity=p["min_similarity"]
         )
         
-        # Early return if no similar entities found
+        # Fallback: if nothing matched, try LLM query-expansion once
+        if not similar_entities:
+            expanded = self._expand_query(query)
+            if expanded != query:
+                print(f"[Search] Retrying with expanded query: {expanded}")
+                query_embedding = self._get_embedding(expanded)
+                similar_entities = self._find_similar_entities(
+                    query_embedding,
+                    top_k=p["top_k_entities"],
+                    min_similarity=p["min_similarity"]
+                )
+
+        # Still nothing? early exit
         if not similar_entities:
             return {
                 "query": query,
@@ -436,22 +547,44 @@ class GraphSearchEngine:
             similarities=similarities
         )
         
-        # Collect context
+        # --- Merge keyword + embedding results into one ranked list ---
+        combined_entities: List[Dict[str, Any]] = []
+
+        # 1) keyword hits – construct entity dicts
+        for node_id, data in keyword_hits:
+            combined_entities.append({
+                "id": node_id,
+                "name": data.get("name"),
+                "type": data.get("type"),
+                "source_file": data.get("source_file"),
+                "lineno": data.get("lineno"),
+                "description": data.get("description", ""),
+                "code_snippet": data.get("code_snippet", ""),
+                "score": 1.0  # keyword hits get max score
+            })
+
+        # 2) embedding hits not already included
+        keyword_ids = set(e["id"] for e in combined_entities)
+        for ent in ranked_entities:
+            if ent["id"] not in keyword_ids:
+                combined_entities.append(ent)
+
+        # 3) Truncate to max_context_items
+        combined_entities = combined_entities[:p["max_context_items"]]
+
+        # 4) Collect context
         context = self._collect_context(
-            ranked_entities=ranked_entities,
+            ranked_entities=combined_entities,
             max_items=p["max_context_items"],
             include_code=p["include_code"]
         )
-        
-        # Return results
-        results = {
+
+        return {
             "query": query,
-            "entities": ranked_entities,
+            "entities": combined_entities,
             "context": context,
             "status": "success"
         }
-        
-        return results
         
     def _compute_report_embeddings(self) -> Dict[Tuple[int, int], Dict[str, List[float]]]:
         """
@@ -1141,6 +1274,37 @@ class GraphSearchEngine:
             "total_steps": aggregated_results["total_steps"],
             "status": "success"
         }
+    
+    # ------------------------------------------------------------------
+    # Query-expansion helper: rewrite vague questions into code keywords.
+    # ------------------------------------------------------------------
+    def _expand_query(self, query: str) -> str:
+        """Return a comma-separated list of keywords that likely occur in code.
+
+        This is only called when the first similarity search found *no* entities,
+        so the extra OpenAI call is paid for sparingly.  If the call fails, we
+        simply return the original query string.
+        """
+        system_prompt = (
+            "You are an assistant helping with static code search. "
+            "Rewrite the user's question into a short, comma-separated list of "
+            "Python-code tokens or phrases that are likely to appear *verbatim* "
+            "in source files.  Use 3-10 items.  Do **not** add explanations."  )
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.chat_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": query}
+                ],
+                temperature=0.0,
+                max_tokens=60,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[Search] Query expansion failed: {e}")
+            return query  # fallback to original
     
 
 # Usage example

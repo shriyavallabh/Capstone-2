@@ -572,164 +572,162 @@ def process_query(
         query_lower = query.lower()
         is_structure_query = any(keyword in query_lower for keyword in structure_keywords)
         
-        if is_structure_query and community_detector:
-            print(f"Detected structure-related query: '{query}'")
-            
-            # Get community information at the architectural level (level 2)
-            level = 2  # Architectural level
-            communities = community_detector.get_communities_at_level(level)
-            
-            if communities:
-                print(f"Found {len(communities)} communities at level {level}")
-                
-                # Get the entities in each community
-                community_data = []
-                for comm_id, node_ids in communities.items():
-                    nodes = [graph.graph.nodes[nid] for nid in node_ids if nid in graph.graph.nodes]
-                    # Filter to only include nodes with names (exclude anonymous nodes)
-                    named_nodes = [n for n in nodes if 'name' in n and n.get('name')]
+        # --- Structure Query Handling ---
+        if is_structure_query:
+            print(f"DEBUG: Detected structure query: '{query}'") # DEBUG LINE
+            if community_detector:
+                print("DEBUG: Community detector found.") # DEBUG LINE
+                # Get community information at the architectural level (level 2)
+                level = 2  # Architectural level
+                try:
+                    communities = community_detector.get_communities_at_level(level)
+                    print(f"DEBUG: Found {len(communities)} communities at level {level}") # DEBUG LINE
                     
-                    # Group by type
-                    types = {}
-                    for node in named_nodes:
-                        node_type = node.get('type', 'Unknown')
-                        if node_type not in types:
-                            types[node_type] = []
-                        types[node_type].append(node.get('name', ''))
-                    
-                    # Determine community name from files or dominant node types
-                    community_name = f"Community {comm_id}"
-                    source_files = set()
-                    for node in named_nodes:
-                        if 'source_file' in node and node['source_file']:
-                            parts = node['source_file'].split('/')
-                            if len(parts) > 1:
-                                source_files.add(parts[0])  # Top-level dir
-                    
-                    if source_files:
-                        community_name = f"Module: {', '.join(sorted(source_files)[:3])}"
-                        if len(source_files) > 3:
-                            community_name += " and others"
-                    
-                    community_data.append({
-                        "id": comm_id,
-                        "name": community_name,
-                        "size": len(named_nodes),
-                        "types": types,
-                        "nodes": named_nodes[:10]  # Limit to top 10 nodes for context
-                    })
-                
-                # Sort communities by size
-                community_data.sort(key=lambda x: x["size"], reverse=True)
-                
-                # Structure the community information for the RAG response
-                structured_info = []
-                for i, comm in enumerate(community_data[:5]):  # Top 5 communities
-                    section = f"Component {i+1}: {comm['name']}\n"
-                    section += f"Size: {comm['size']} entities\n"
-                    section += "Main entity types:\n"
-                    
-                    # List the main types and count
-                    for t, entities in comm['types'].items():
-                        if len(entities) > 0:
-                            section += f"- {t}: {len(entities)} entities\n"
-                            # List a few examples
-                            examples = entities[:3]
-                            if examples:
-                                section += f"  Examples: {', '.join(examples)}"
-                                if len(entities) > 3:
-                                    section += f" and {len(entities) - 3} more"
-                                section += "\n"
-                    
-                    structured_info.append(section)
-                
-                # Create a special context for structure queries
-                structure_context = "--- Codebase Structure Overview ---\n\n"
-                structure_context += f"This codebase has {len(communities)} main components at the architectural level.\n\n"
-                structure_context += "\n\n".join(structured_info)
-                
-                # Add this structure overview to the context
-                context_entities = []
-                
-                # Still do a standard search but with modified parameters
-                print(f"Searching codebase with strategy: {search_settings['strategy']}")
-                search_results = search_codebase(
-                    query=query,
-                    graph=graph,
-                    community_detector=community_detector,
-                    community_reports=community_reports,
-                    strategy=search_settings["strategy"],
-                    params=params
-                )
-                
-                # Add the standard search results to our context
-                if search_results.get("entities"):
-                    context_entities = search_results.get("entities")
-                
-                # Format the structure context as an entity
-                structure_entity = {
-                    "id": "structure_overview",
-                    "name": "Codebase Structure Overview",
-                    "type": "Documentation",
-                    "source_file": "",
-                    "lineno": 0,
-                    "end_lineno": 0,
-                    "description": "An overview of the main components and modules in the codebase.",
-                    "code_snippet": structure_context,
-                    "community": None,
-                    "distance": 0
-                }
-                
-                # Prepend the structure overview to ensure it gets priority
-                context_entities.insert(0, structure_entity)
-                
-                # Get the response from the RAG engine
-                print(f"Generating response with structure context and {len(context_entities)} context items")
-                response = rag_engine.generate_response(
-                    query_text=query,
-                    context=context_entities,
-                    timeout=timeout
-                )
-                
-                return {
-                    "response_text": response.get("content", ""),
-                    "code_references": response.get("references", []),
-                    "status": "success",
-                    "error_message": "",
-                    "metadata": {
-                        "query_time": response.get("query_time", 0),
-                        "context_items": len(context_entities),
-                        "token_count": response.get("token_count", 0),
-                        "is_structure_query": True
-                    }
-                }
+                    if communities:
+                        # Get the entities in each community
+                        community_data = []
+                        for comm_id, node_ids in communities.items():
+                            nodes = [graph.graph.nodes[nid] for nid in node_ids if nid in graph.graph.nodes]
+                            # Filter to only include nodes with names (exclude anonymous nodes)
+                            named_nodes = [n for n in nodes if 'name' in n and n.get('name')]
+                            
+                            # Group by type
+                            types = {}
+                            for node in named_nodes:
+                                node_type = node.get('type', 'Unknown')
+                                if node_type not in types:
+                                    types[node_type] = []
+                                types[node_type].append(node.get('name', ''))
+                            
+                            # Determine community name from files or dominant node types
+                            community_name = f"Community {comm_id}"
+                            source_files = set()
+                            for node in named_nodes:
+                                if 'source_file' in node and node['source_file']:
+                                    parts = node['source_file'].split('/')
+                                    if len(parts) > 1:
+                                        source_files.add(parts[0])  # Top-level dir
+                            
+                            if source_files:
+                                community_name = f"Module: {', '.join(sorted(source_files)[:3])}"
+                                if len(source_files) > 3:
+                                    community_name += " and others"
+                            
+                            community_data.append({
+                                "id": comm_id,
+                                "name": community_name,
+                                "size": len(named_nodes),
+                                "types": types,
+                                "nodes": named_nodes[:10]  # Limit to top 10 nodes for context
+                            })
+                        
+                        # Sort communities by size
+                        community_data.sort(key=lambda x: x["size"], reverse=True)
+                        
+                        # Structure the community information for the RAG response
+                        structured_info = []
+                        for i, comm in enumerate(community_data[:5]):  # Top 5 communities
+                            section = f"Component {i+1}: {comm['name']}\n"
+                            section += f"Size: {comm['size']} entities\n"
+                            section += "Main entity types:\n"
+                            
+                            # List the main types and count
+                            for t, entities in comm['types'].items():
+                                if len(entities) > 0:
+                                    section += f"- {t}: {len(entities)} entities\n"
+                                    # List a few examples
+                                    examples = entities[:3]
+                                    if examples:
+                                        section += f"  Examples: {', '.join(examples)}"
+                                        if len(entities) > 3:
+                                            section += f" and {len(entities) - 3} more"
+                                        section += "\n"
+                        
+                        structured_info.append(section)
+                        
+                        # Create a special context for structure queries
+                        structure_context = "--- Codebase Structure Overview ---\n\n"
+                        structure_context += f"This codebase has {len(communities)} main components at the architectural level.\n\n"
+                        structure_context += "\n\n".join(structured_info)
+                        
+                        # Add this structure overview to the context
+                        context_entities = []
+                        
+                        # Still do a standard search but with modified parameters
+                        print(f"Searching codebase with strategy: {search_settings['strategy']}")
+                        search_results = search_codebase(
+                            query=query,
+                            graph=graph,
+                            community_detector=community_detector,
+                            community_reports=community_reports,
+                            strategy=search_settings["strategy"],
+                            params=params
+                        )
+                        
+                        # Add the standard search results to our context
+                        if search_results.get("entities"):
+                            context_entities = search_results.get("entities")
+                        
+                        # Format the structure context as an entity
+                        structure_entity = {
+                            "id": "structure_overview",
+                            "name": "Codebase Structure Overview",
+                            "type": "Documentation",
+                            "source_file": "",
+                            "lineno": 0,
+                            "end_lineno": 0,
+                            "description": "An overview of the main components and modules in the codebase.",
+                            "code_snippet": structure_context,
+                            "community": None,
+                            "distance": 0
+                        }
+                        
+                        # Prepend the structure overview to ensure it gets priority
+                        context_entities.insert(0, structure_entity)
+                        
+                        # Get the response from the RAG engine
+                        print(f"Generating response with structure context and {len(context_entities)} context items")
+                        response = rag_engine.generate_response(
+                            query_text=query,
+                            context=context_entities,
+                            timeout=timeout
+                        )
+                        
+                        return {
+                            "response_text": response.get("content", ""),
+                            "code_references": response.get("references", []),
+                            "status": "success",
+                            "error_message": "",
+                            "metadata": {
+                                "query_time": response.get("query_time", 0),
+                                "context_items": len(context_entities),
+                                "token_count": response.get("token_count", 0),
+                                "is_structure_query": True
+                            }
+                        }
+                    else:
+                        print("DEBUG: No communities found at level 2, falling back to standard search.") # DEBUG LINE
+                        is_structure_query = False # Force fallback
+                except Exception as e:
+                    print(f"DEBUG: Error getting/processing communities: {e}. Falling back.") # DEBUG LINE
+                    is_structure_query = False # Force fallback
+            else:
+                print("DEBUG: Community detector NOT found, falling back to standard search.") # DEBUG LINE
+                is_structure_query = False # Force fallback
         
-        # Standard search for non-structure queries or if community info failed
-        print(f"Searching codebase with strategy: {search_settings['strategy']}")
-        search_results = search_codebase(
-            query=query,
-            graph=graph,
-            community_detector=community_detector,
-            community_reports=community_reports,
-            strategy=search_settings["strategy"],
-            params=params
-        )
-        
-        # Check if search yielded results
-        if not search_results.get("entities") and not search_results.get("communities"):
-            # Try a fallback broader search if too restrictive
-            print("Initial search yielded no results, trying broader search...")
-            fallback_params = params.copy()
-            fallback_params["min_similarity"] = 0.5 if "min_similarity" in params and params["min_similarity"] > 0.5 else 0.5
-            
-            search_results = search_codebase(
-                query=query,
-                graph=graph,
-                community_detector=community_detector,
-                community_reports=community_reports,
-                strategy=search_settings["strategy"],
-                params=fallback_params
-            )
+        # --- Standard Search (or fallback) ---
+        # This block now runs if it wasn't a structure query OR if structure handling failed
+        if not is_structure_query: 
+             print(f"DEBUG: Entering standard search path for query: '{query}'") # DEBUG LINE
+             # Standard search for non-structure queries or if community info failed
+             search_results = search_codebase(
+                 query=query,
+                 graph=graph,
+                 community_detector=community_detector,
+                 community_reports=community_reports,
+                 strategy=search_settings["strategy"],
+                 params=params
+             )
         
         # Get the response from the RAG engine
         print(f"Generating response with {len(search_results.get('entities', []))} context items")

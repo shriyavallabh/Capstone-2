@@ -964,6 +964,7 @@ def create_enhanced_visualization(
         node_hover_texts = []
         node_colors = []
         node_sizes = []
+        node_labels = []  # NEW list to hold visible labels
         for node, data in graph.nodes(data=True):
             if node in pos:
                 x, y = pos[node]
@@ -987,18 +988,43 @@ def create_enhanced_visualization(
                 if code_snippet:
                      hover_info += f"<br>--- Code ---<br><pre style='white-space: pre-wrap; word-wrap: break-word;'>{code_snippet[:max_snippet_len].replace('\n','<br>')}{'...' if len(code_snippet)>max_snippet_len else ''}</pre>"
                 node_hover_texts.append(hover_info)
-
+                node_labels.append(node_name)  # Store label
+        
         node_trace = go.Scatter(
             x=node_x, y=node_y,
-            mode='markers', # Markers only, no persistent text labels
+            mode='markers+text',  # show labels
+            text=node_labels,
+            textposition='top center',
+            textfont=dict(size=12, color='#000000'),
             hovertext=node_hover_texts, 
             hoverinfo='text',
             marker=dict(
                 color=node_colors,
                 size=node_sizes,
-                opacity=0.9, # Slightly more opaque
-                line=dict(width=1, color='#FFFFFF') # White border for contrast
+                opacity=0.9,
+                line=dict(width=1, color='#FFFFFF')
             )
+        )
+
+        # Edge label trace
+        edge_label_x = []
+        edge_label_y = []
+        edge_labels = []
+        for (u, v, data), (mx, my) in zip(graph.edges(data=True), edge_midpoints):
+            if mx is None:
+                continue
+            edge_label_x.append(mx)
+            edge_label_y.append(my)
+            edge_labels.append(data.get('type', ''))
+
+        edge_label_trace = go.Scatter(
+            x=edge_label_x,
+            y=edge_label_y,
+            mode='text',
+            text=edge_labels,
+            textposition='middle center',
+            textfont=dict(size=10, color='#444444'),
+            hoverinfo='none'
         )
 
         # --- Layout --- 
@@ -1055,7 +1081,7 @@ def create_enhanced_visualization(
         layout.annotations = arrow_annotations
 
         # --- Figure --- 
-        fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
+        fig = go.Figure(data=[edge_trace, edge_label_trace, node_trace], layout=layout)
 
         # --- Configuration --- 
         config = {
