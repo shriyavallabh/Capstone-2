@@ -173,84 +173,87 @@ class CommunityReportGenerator:
          return self._client
 
     def _get_community_context_string(self, level_idx: int, community_id: int, max_entities: int = 10) -> str:
-         """Helper to get formatted context string for a community."""
-         members = self.community_detector.get_nodes_in_community(level_idx, community_id)
-         if not members:
-              return "This community is empty."
-         
-         context_str = f"Context for Community {community_id} (Level {level_idx}):\n"
-         context_str += f"Number of members: {len(members)}\n"
-         context_str += "Sample Members:\n"
-         count = 0
-         for node_id in members:
-              if node_id in self.graph.graph.nodes:
-                   node_data = self.graph.graph.nodes[node_id]
-                   context_str += f"- {node_data.get('name','?')} ({node_data.get('type','?')}) in {os.path.basename(node_data.get('source_file','?'))}\n"
-                   # Add description if available
-                   desc = node_data.get('description', '')
-                   if desc and desc != "No description available":
-                        context_str += f"  Description: {desc[:100]}{'...' if len(desc) > 100 else ''}\n"
-                   count += 1
-                   if count >= max_entities:
-                        break 
-         return context_str
+        """Helper to get formatted context string for a community."""
+        members = self.community_detector.get_nodes_in_community(level_idx, community_id)
+        
+        # Check if members list is empty
+        if not members:
+            return "This community is empty."
+        
+        # Build context string
+        context_str = f"Context for Community {community_id} (Level {level_idx}):\n"
+        context_str += f"Number of members: {len(members)}\n"
+        context_str += "Sample Members:\n"
+        count = 0
+        for node_id in members:
+            if node_id in self.graph.graph.nodes:
+                node_data = self.graph.graph.nodes[node_id]
+                context_str += f"- {node_data.get('name','?')} ({node_data.get('type','?')}) in {os.path.basename(node_data.get('source_file','?'))}\n"
+                # Add description if available
+                desc = node_data.get('description', '')
+                if desc and desc != "No description available":
+                    context_str += f"  Description: {desc[:100]}{'...' if len(desc) > 100 else ''}\n"
+                count += 1
+                if count >= max_entities:
+                    break 
+        return context_str
 
     def _generate_report_with_gpt(self, context_str: str) -> str:
-         """Generates the report text using an LLM call."""
-         # Define the system prompt instructing the LLM
-         system_prompt = ( 
-              "You are an expert code analyst. Based on the provided context about a code community "
-              "(a group of related code entities like functions and classes), generate a concise report "
-              "in JSON format. The report should have the following keys: 'title' (a short, descriptive name), "
-              "'summary' (a 1-2 sentence overview of the community's purpose), 'key_entities' (a list of up to 5 "
-              "most important entity names within the community mentioned in the context), and 'architectural_patterns' "
-              "(a list of any potential software design patterns observed, e.g., Singleton, Factory, Observer). "
-              "Focus only on the provided context."
-         )
-         
-         messages = [
-              {"role": "system", "content": system_prompt},
-              {"role": "user", "content": context_str}
-         ]
-         
-         try:
-              client = self.get_openai_client()
-              response = client.chat.completions.create(
-                   model=MODEL_CONFIG["models"]["code_analysis"], # Use appropriate model
-                   messages=messages,
-                   response_format={ "type": "json_object" }, # Request JSON output
-                   temperature=0.3,
-                   max_tokens=500 # Adjust as needed
-              )
-              return response.choices[0].message.content
-         except Exception as e:
-              print(f"Error calling OpenAI for report generation: {e}")
-              # Return placeholder JSON on error
-              return json.dumps({ 
-                   "title": "Error Generating Report", 
-                   "summary": f"Failed to generate report: {e}",
-                   "key_entities": [],
-                   "architectural_patterns": []
-              })
+        """Generates the report text using an LLM call."""
+        # Define the system prompt instructing the LLM
+        system_prompt = ( 
+            "You are an expert code analyst. Based on the provided context about a code community "
+            "(a group of related code entities like functions and classes), generate a concise report "
+            "in JSON format. The report should have the following keys: 'title' (a short, descriptive name), "
+            "'summary' (a 1-2 sentence overview of the community's purpose), 'key_entities' (a list of up to 5 "
+            "most important entity names within the community mentioned in the context), and 'architectural_patterns' "
+            "(a list of any potential software design patterns observed, e.g., Singleton, Factory, Observer). "
+            "Focus only on the provided context."
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": context_str}
+        ]
+        
+        try:
+            client = self.get_openai_client()
+            response = client.chat.completions.create(
+                model=MODEL_CONFIG["models"]["code_analysis"], # Use appropriate model
+                messages=messages,
+                response_format={ "type": "json_object" }, # Request JSON output
+                temperature=0.3,
+                max_tokens=500 # Adjust as needed
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Error calling OpenAI for report generation: {e}")
+            # Return placeholder JSON on error
+            return json.dumps({ 
+                "title": "Error Generating Report", 
+                "summary": f"Failed to generate report: {e}",
+                "key_entities": [],
+                "architectural_patterns": []
+            })
 
     def _parse_report_sections(self, report_json_str: str) -> Dict[str, Any]:
-         """Parses the JSON string returned by the LLM."""
-         try:
-              report_data = json.loads(report_json_str)
-              # Basic validation
-              if not isinstance(report_data, dict): return {}
-              return {
-                   "title": report_data.get("title", "Untitled Community"),
-                   "summary": report_data.get("summary", "No summary provided."),
-                   "key_entities": report_data.get("key_entities", []), # Expecting list of strings
-                   "architectural_patterns": report_data.get("architectural_patterns", []) # Expecting list
-              }
-         except json.JSONDecodeError as e:
-              print(f"Error parsing LLM report JSON: {e}\nContent: {report_json_str[:500]}...")
-              return {}
-         except Exception as e:
-              print(f"Unexpected error parsing report: {e}")
-              return {}
+        """Parses the JSON string returned by the LLM."""
+        try:
+            report_data = json.loads(report_json_str)
+            # Basic validation
+            if not isinstance(report_data, dict): return {}
+            return {
+                "title": report_data.get("title", "Untitled Community"),
+                "summary": report_data.get("summary", "No summary provided."),
+                "key_entities": report_data.get("key_entities", []), # Expecting list of strings
+                "architectural_patterns": report_data.get("architectural_patterns", []) # Expecting list
+            }
+        except json.JSONDecodeError as e:
+            print(f"Error parsing LLM report JSON: {e}\nContent: {report_json_str[:500]}...")
+            return {}
+        except Exception as e:
+            print(f"Unexpected error parsing report: {e}")
+            return {}
 
     def generate_report_for_community(self, level_idx: int, community_id: int) -> Optional[CommunityReport]:
         """Generates a single community report and indexes its embeddings."""
@@ -261,10 +264,10 @@ class CommunityReportGenerator:
             
             context_str = self._get_community_context_string(level_idx, community_id)
             if context_str == "This community is empty.":
-                 report.title = f"Empty Community {community_id}"
-                 report.summary = "This community has no members."
-                 self.reports[(level_idx, community_id)] = report
-                 return report # Return empty report
+                report.title = f"Empty Community {community_id}"
+                report.summary = "This community has no members."
+                self.reports[(level_idx, community_id)] = report
+                return report # Return empty report
 
             llm_report_json = self._generate_report_with_gpt(context_str)
             parsed_sections = self._parse_report_sections(llm_report_json)
@@ -302,7 +305,7 @@ class CommunityReportGenerator:
                 #    if full_report_embedding is not None:
                 #        report.full_report_embedding = full_report_embedding
                 #        if self.faiss_enabled and self.faiss_manager:
-                #             self.faiss_manager.add_embeddings("report_full", [report_faiss_id], full_report_embedding.reshape(1, -1))
+                #            self.faiss_manager.add_embeddings("report_full", [report_faiss_id], full_report_embedding.reshape(1, -1))
             
             self.reports[(level_idx, community_id)] = report
             return report
@@ -310,7 +313,7 @@ class CommunityReportGenerator:
             print(f"ERROR generating report for L{level_idx} C{community_id}: {e}")
             # traceback.print_exc() # Uncomment for debugging
             return None
-
+    
     def generate_all_reports(self) -> Dict[Tuple[int, int], CommunityReport]:
         """Generates reports for all communities across all levels and ensures FAISS indices are saved."""
         print("Generating community reports for all levels...")
@@ -336,7 +339,7 @@ class CommunityReportGenerator:
         end_time = time.time()
         print(f"Generated all reports in {end_time - start_time:.2f} seconds.")
         return self.reports
-        
+    
     def find_similar_reports(self,
                            query_text: str,
                            level_idx: Optional[int] = None,
@@ -481,5 +484,5 @@ def generate_community_reports(graph: CodeKnowledgeGraph,
     # Save report metadata (embeddings are in FAISS)
     if output_dir:
         print(f"Saving reports metadata to {output_dir}...")
-        generator.save_reports(output_dir) 
-    return reports 
+        generator.save_reports(output_dir)
+    return reports

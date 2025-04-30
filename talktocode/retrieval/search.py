@@ -790,16 +790,21 @@ class GraphSearchEngine:
         Returns:
             List of hypothetical answers
         """
+        system_prompt = (
+            "You are a helpful AI assistant specialized in analyzing and explaining codebases based on provided context. "
+            "Your goal is to answer questions accurately using ONLY the information given in the CONTEXT section below. "
+            "Do NOT use any external knowledge or make assumptions beyond the provided context. "
+            "If the context does not contain the answer, state that the information is not available in the provided codebase context. "
+            "Do not answer questions unrelated to the codebase or the provided context. "
+            "Format your answers clearly, using markdown for code blocks where appropriate. "
+            "If the query asks about code structure or high-level organization, use the community report summaries and key entities if available in the context."
+        )
+        
         # Create messages for the chat API
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are an expert code analyst. Given a query about a codebase "
-                    "and some initial context, generate multiple hypothetical answers "
-                    "that could guide further exploration. Each hypothesis should be "
-                    "specific enough to verify with targeted code searches."
-                )
+                "content": system_prompt
             },
             {
                 "role": "user",

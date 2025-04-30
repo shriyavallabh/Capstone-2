@@ -371,22 +371,8 @@ def create_graph_container(
                         st.rerun()
                 
                 elif "communities" in search_results and search_results["communities"]:
-                    # Global search results
-                    communities = search_results["communities"]
-                    
-                    # Create a table of results
-                    data = []
-                    for community in communities:
-                        data.append({
-                            "Level": community["level"] + 1,  # 1-indexed for display
-                            "ID": community["id"],
-                            "Title": community["title"],
-                            "Similarity": f"{community['similarity']:.3f}",
-                            "Nodes": community["node_count"],
-                            "Summary": community["summary"][:100] + "..." if len(community["summary"]) > 100 else community["summary"]
-                        })
-                    
-                    st.table(data)
+                    # Replace with message about communities feature being removed
+                    st.info("The code communities feature has been removed from this application.")
     
     return tab1, tab2
 
@@ -562,12 +548,8 @@ def extract_entity_details(entity_id: str, search_results: Dict[str, Any]) -> Di
     return None
 
 def extract_community_details(community_id: int, level: int, search_results: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract details about a specific community from search results."""
-    if "communities" in search_results:
-        for community in search_results["communities"]:
-            if community["id"] == community_id and community["level"] == level:
-                return community
-    return None
+    """This function has been deprecated as the communities feature is no longer available."""
+    return {}
 
 # Graph visualization functions
 def create_plotly_graph(
@@ -786,9 +768,12 @@ def display_graph_with_controls(
             
             with col1:
                 view_mode = st.selectbox(
-                    "View Mode",
-                    ["standard", "community", "hierarchy", "focus", "static"],
-                    help="Select visualization style"
+                    "View mode",
+                    ["standard", "hierarchy", "focus", "static"],  # Removed 'community' option
+                    index=0,
+                    key="view_mode",
+                    on_change=lambda: update_graph(),
+                    help="How to visualize the graph"
                 )
             
             with col2:
@@ -865,28 +850,6 @@ def display_graph_with_controls(
             
             # Display the graph with specific config
             st.plotly_chart(fig, config=config, use_container_width=True)
-            
-            # Show legend for community colors if in community mode
-            if view_mode == "community" and communities:
-                st.markdown("### Community Legend")
-                
-                # Create a grid layout for the legend
-                legend_cols = st.columns(4)
-                
-                for i, comm_id in enumerate(communities.keys()):
-                    col_idx = i % 4
-                    color_idx = i % len(px.colors.qualitative.Bold)
-                    color = px.colors.qualitative.Bold[color_idx]
-                    
-                    with legend_cols[col_idx]:
-                        st.markdown(
-                            f'<div style="display:flex;align-items:center;margin-bottom:5px;">'
-                            f'<div style="width:15px;height:15px;background-color:{color};'
-                            f'margin-right:5px;border-radius:50%;"></div>'
-                            f'<span>Community {comm_id}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
 
 # Utility function to create a download link for data
 def get_download_link(data, filename, text):
