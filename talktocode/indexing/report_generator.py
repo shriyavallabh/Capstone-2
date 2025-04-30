@@ -232,8 +232,8 @@ class CommunityReportGenerator:
             return json.dumps({ 
                 "title": "Error Generating Report", 
                 "summary": f"Failed to generate report: {e}",
-                "key_entities": [],
-                "architectural_patterns": []
+            "key_entities": [],
+            "architectural_patterns": []
             })
 
     def _parse_report_sections(self, report_json_str: str) -> Dict[str, Any]:

@@ -708,7 +708,7 @@ def process_query(
                     else:
                         print("DEBUG: No communities found at level 2, falling back to standard search.") # DEBUG LINE
                         is_structure_query = False # Force fallback
-                except Exception as e:
+        except Exception as e:
                     print(f"DEBUG: Error getting/processing communities: {e}. Falling back.") # DEBUG LINE
                     is_structure_query = False # Force fallback
             else:
@@ -721,10 +721,10 @@ def process_query(
              print(f"DEBUG: Entering standard search path for query: '{query}'") # DEBUG LINE
              # Standard search for non-structure queries or if community info failed
              search_results = search_codebase(
-                 query=query,
-                 graph=graph,
-                 community_detector=community_detector,
-                 community_reports=community_reports,
+                query=query,
+                graph=graph,
+                community_detector=community_detector,
+                community_reports=community_reports,
                  strategy=search_settings["strategy"],
                  params=params
              )
@@ -748,15 +748,15 @@ def process_query(
                 "token_count": response.get("token_count", 0)
             }
         }
-    except Exception as e:
+        except Exception as e:
         print(f"Error in process_query: {e}")
         # traceback.print_exc()
         return {
             "response_text": f"I encountered an error while processing your query. Please try rephrasing or ask a different question.",
-            "code_references": [],
-            "status": "error",
-            "error_message": str(e),
-            "metadata": {}
+                "code_references": [],
+                "status": "error",
+                "error_message": str(e),
+                "metadata": {}
         }
 
 def handle_message(prompt):
@@ -811,8 +811,8 @@ def handle_message(prompt):
             for i, (message, progress_value) in enumerate(milestones):
                 time.sleep(0.3)  # Faster updates (reduced from 0.4)
                 try:
-                    progress_bar.progress(progress_value)
-                    progress_text.write(message)
+                progress_bar.progress(progress_value)
+                progress_text.write(message)
                 except Exception as e:
                     # Silently handle missing context errors when running in thread
                     print(f"Progress update ignored: {str(e)}")
@@ -956,7 +956,7 @@ def main():
                     graph_placeholder.error("Internal Error: Cannot access the graph object within CodeKnowledgeGraph. Check attribute name (e.g., self.graph).")
                 else:
                     graph_placeholder.error(f"Failed to render graph visualization (AttributeError): {ae}")
-            except Exception as e:
+        except Exception as e:
                 graph_placeholder.error(f"Failed to render graph visualization: {e}")
         elif st.session_state.get("code_dir") and not st.session_state.get("processing_complete"):
             st.info("Processing codebase... Please wait.")
@@ -1002,13 +1002,13 @@ def main():
             {"role": "user", "content": prompt, "timestamp": datetime.now()}
         )
         st.session_state.prompt_to_process = prompt
-        st.rerun()
+            st.rerun()
         
     if "prompt_to_process" in st.session_state and st.session_state.prompt_to_process:
         prompt_to_process = st.session_state.prompt_to_process
         st.session_state.prompt_to_process = None
         handle_message(prompt_to_process)
-        st.rerun()
+            st.rerun()
     
 if __name__ == "__main__":
     main() 
